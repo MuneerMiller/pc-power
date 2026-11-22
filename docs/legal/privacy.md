@@ -18,15 +18,19 @@ None. PC Power does not send any information to us or to anyone else. We have no
 
 To work, PC Power keeps some technical details on your devices. They never leave your devices except when your phone and your computer talk directly to each other.
 
-On your phone: the names of the computers you paired; their network addresses (IP address, hardware "MAC" address and, if you enter one, your public address or DDNS name); a fingerprint of each computer's security certificate; and an access key for each computer, kept in your phone's encrypted storage. These are excluded from Android backups.
+On your phone: the names of the computers you paired; their network addresses (IP address, hardware "MAC" address and, if you enter one, your public address or DDNS name); a fingerprint of each computer's security certificate; and an access key for each computer, kept in your phone's encrypted storage. These are excluded from Android backups. So that the home-screen widget and quick settings tile can turn a computer on, the app keeps a copy of that one computer's name and addresses where the widget can read it; the access key is never included.
 
 On your computer: the computer's name; the pairing code; your schedules; the name and pairing date of each paired phone, with a scrambled (hashed) copy of its access key; the security certificate the app created; and a log file listing recent actions and the network addresses they came from. The log is replaced each time the app starts.
+
+The computer also keeps a short activity list (the last 100 entries, such as "Shut down, from Sam's phone" or "Scheduled sleep postponed"), your timer, your automatic rules and your days off. Paired phones can read the activity list.
+
+To avoid turning the computer off while it is being used, the Windows app checks how long ago the keyboard or mouse was last used, whether a full-screen app is open, which programs have asked Windows to stay awake, and how busy the network connection is. It does not look at what you type, what is on your screen or what is being transferred. These checks are used in the moment and are not recorded, except that the reason a schedule was postponed (which can include the name of a program) appears in the activity list.
 
 ## 4. How the apps communicate
 
 Your phone and computer talk directly to each other over your own network, using an encrypted connection. If you set up access from outside your home, they talk directly over the internet in the same encrypted way.
 
-To find computers and to turn them on, the phone sends small signals on your local network. The turn-on signal contains the computer's hardware address and is not encrypted; that is how the Wake-on-LAN standard works.
+To find computers and to turn them on, the phone sends small signals on your local network. The turn-on signal contains the computer's hardware address and is not encrypted; that is how the Wake-on-LAN standard works. If you have paired more than one computer, the phone may ask a computer that is on to send that signal for another one; to do so it sends that computer the other one's name and hardware address over the encrypted connection.
 
 Your internet provider and network equipment can see that devices are communicating, as with any app, but not what is said over the encrypted connection.
 
@@ -34,7 +38,7 @@ Your internet provider and network equipment can see that devices are communicat
 
 The Android app asks only for network access, which it needs to reach your computers. It does not ask for your location, contacts, camera, microphone, files or any other personal data.
 
-The Windows app listens on your network so that paired phones can reach it. With your approval, it can change the Windows power and network-card settings described in the app.
+The Windows app listens on your network so that paired phones can reach it. With your approval, it can change the Windows power and network-card settings described in the app. If you choose to install it, it adds a background service that starts with Windows, a firewall rule for private networks and a Start menu shortcut, all removed again when you uninstall.
 
 ## 6. Sharing
 
@@ -42,7 +46,7 @@ We do not share your information with anyone, because we do not have it. PC Powe
 
 ## 7. Keeping and deleting information
 
-The information stays on your devices for as long as you keep the app. To delete it: remove a computer in the phone app, remove a phone in the PC Power window, or uninstall the app. On Windows, uninstalling means: untick "Start PC Power when I sign in to Windows", quit the app, then delete the program and the folder named PCPower in your user profile's AppData\Roaming folder.
+The information stays on your devices for as long as you keep the app. To delete it: remove a computer in the phone app, remove a phone in the PC Power window, or uninstall the app. On Windows, if you installed PC Power, uninstall it from Settings, Apps, Installed apps: that removes the program, its background service, its firewall rule and all of its settings. If you only ran the portable copy, quit it and delete the program and the folder named PCPower in your user profile's AppData\Roaming folder.
 
 ## 8. Security
 

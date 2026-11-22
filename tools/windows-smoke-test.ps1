@@ -93,7 +93,7 @@ Check 'settings survive a service restart' ($st.idle.enabled -and $st.schedules.
 # Uninstall
 $p = Start-Process "$env:ProgramFiles\PC Power\PCPower.exe" -ArgumentList '--uninstall', '--quiet' -Wait -PassThru
 Check 'uninstaller finished without error' ($p.ExitCode -eq 0)
-Start-Sleep 8
+Start-Sleep 12
 Check 'service removed' (-not (Get-Service PCPower -ErrorAction SilentlyContinue))
 Check 'settings removed' (-not (Test-Path $data))
 Check 'program folder removed' (-not (Test-Path "$env:ProgramFiles\PC Power"))

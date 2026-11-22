@@ -40,4 +40,23 @@ void main() {
     await t.pump(const Duration(milliseconds: 300));
     expect(find.text('Before you start'), findsOneWidget);
   });
+  test('the widget gets the wake address of the chosen PC and never an access key', () async {
+    SharedPreferences.setMockInitialValues({});
+    Store.pcs = [
+      Pc(id: 'a', name: 'Desk', host: '192.168.1.5', port: 8787, fp: 'ff', mac: 'aa:bb:cc:dd:ee:01', broadcast: '192.168.1.255'),
+      Pc(id: 'b', name: 'Media', host: '192.168.1.6', port: 8787, fp: 'ee', mac: 'aa:bb:cc:dd:ee:02'),
+    ];
+    Store.widgetPcId = '';
+    await Store.save();
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('wake_target'), contains('Desk'));
+    Store.widgetPcId = 'b';
+    await Store.save();
+    final t = prefs.getString('wake_target')!;
+    expect(t, contains('aa:bb:cc:dd:ee:02'));
+    expect(t.contains('token') || t.contains('"fp"'), isFalse);
+    Store.pcs = [];
+    await Store.save();
+    expect(prefs.getString('wake_target'), isNull);
+  });
 }

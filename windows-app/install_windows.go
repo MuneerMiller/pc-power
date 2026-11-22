@@ -18,8 +18,10 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -385,7 +387,11 @@ func doUninstall() error {
 	os.RemoveAll(machineDataDir()) // settings, paired phones, certificate, logs
 	// A running program cannot delete its own file, so hand the last step to a short command.
 	prog := programDir()
-	hidden("cmd", "/c", "ping -n 3 127.0.0.1 >nul & rmdir /s /q \""+prog+"\"").Start()
+	c := exec.Command(filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"))
+	// cmd.exe has its own quoting rules, so the command line is given exactly as it must arrive.
+	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CmdLine: `cmd.exe /d /c "ping -n 4 127.0.0.1 >nul & rmdir /s /q "` + prog + `""`}
+	c.Dir = os.Getenv("SystemRoot")
+	c.Start()
 	return nil
 }
 

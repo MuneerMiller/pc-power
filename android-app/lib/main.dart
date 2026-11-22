@@ -6,6 +6,7 @@ import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
@@ -18,6 +19,7 @@ const accent = Color(0xFF4CC38A);
 const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const actionLabels = {'shutdown': 'Shut down', 'restart': 'Restart', 'sleep': 'Sleep', 'hibernate': 'Hibernate'};
 const scheduleLabels = {...actionLabels, 'wake': 'Turn on'}; // what a schedule can do
+const sessionLabels = {'lock': 'Lock', 'displayoff': 'Screen off', 'mute': 'Mute'}; // instant, nothing to confirm
 
 void main() => runApp(const PcPowerApp());
 
@@ -58,10 +60,35 @@ class Store {
   static List<Pc> pcs = [];
   static Future<void> load() async {
     final raw = (await SharedPreferences.getInstance()).getString('pcs');
+    final prefs = await SharedPreferences.getInstance();
+    widgetPcId = prefs.getString('widgetPc') ?? '';
     if (raw != null) pcs = (jsonDecode(raw) as List).map((e) => Pc.fromJson(e)).toList();
   }
 
-  static Future<void> save() async => (await SharedPreferences.getInstance()).setString('pcs', jsonEncode(pcs));
+  static String widgetPcId = ''; // which PC the home-screen widget and quick tile turn on
+  static const _widget = MethodChannel('pcpower/widget');
+
+  /// The PC the widget turns on: the chosen one, else the first that can be woken.
+  static Pc? get widgetPc {
+    final able = pcs.where((p) => p.mac.isNotEmpty);
+    return able.where((p) => p.id == widgetPcId).firstOrNull ?? able.firstOrNull;
+  }
+
+  static Future<void> save() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('pcs', jsonEncode(pcs));
+    // The widget only gets what it needs to send the wake signal. Never the access key.
+    final w = widgetPc;
+    if (w == null) {
+      await prefs.remove('wake_target');
+    } else {
+      await prefs.setString('wake_target', jsonEncode({'name': w.name, 'mac': w.mac, 'broadcast': w.broadcast, 'wanHost': w.wanHost, 'wanPort': w.wanPort}));
+    }
+    await prefs.setString('widgetPc', widgetPcId);
+    try {
+      await _widget.invokeMethod('refresh');
+    } catch (_) {}
+  }
 }
 
 /// Access tokens, kept in the Android Keystore-backed encrypted storage.
@@ -239,6 +266,35 @@ class Api {
   static Future<void> setSchedule(Pc pc, String id, bool enabled) => _call(pc, 'PATCH', '/api/schedules/$id', {'enabled': enabled});
   static Future<void> deleteSchedule(Pc pc, String id) => _call(pc, 'DELETE', '/api/schedules/$id');
   static Future<void> unpair(Pc pc) => _call(pc, 'POST', '/api/unpair');
+  static Future<String> setTimer(Pc pc, String action, int minutes) async => (await _call(pc, 'POST', '/api/timer', {'action': action, 'minutes': minutes}))['message'] ?? 'Timer set.';
+  static Future<void> cancelTimer(Pc pc) => _call(pc, 'DELETE', '/api/timer');
+  static Future<void> automation(Pc pc, Map<String, dynamic> change) => _call(pc, 'PUT', '/api/automation', change);
+
+  /// Asks every other paired PC that is on to send the wake signal for [target] on its own network.
+  /// This is what makes Turn on work when the phone is away but another PC at home is running.
+  static Future<int> wakeThroughOthers(Pc target) async {
+    final others = Store.pcs.where((p) => p.id != target.id && !p.needsPairing).toList();
+    if (target.mac.isEmpty || others.isEmpty) return 0;
+    final results = await Future.wait([
+      for (final o in others) _call(o, 'POST', '/api/wake-peer', {'mac': target.mac, 'name': target.name}).timeout(const Duration(seconds: 8)).then((_) => 1).catchError((_) => 0),
+    ]);
+    return results.fold<int>(0, (a, b) => a + b);
+  }
+
+  /// Turn on: the wake signal straight from the phone, and through any other paired PC that is on.
+  static Future<String> turnOn(Pc pc) async {
+    Object? error;
+    final relayed = wakeThroughOthers(pc);
+    try {
+      await wake(pc);
+    } catch (e) {
+      error = e;
+    }
+    final helpers = await relayed;
+    if (helpers > 0) return 'Wake signal sent, also through ${helpers == 1 ? 'another PC' : '$helpers other PCs'} at home.';
+    if (error != null) throw error;
+    return 'Wake signal sent. It usually takes under a minute to start.';
+  }
 
   /// Finds PCs running PC Power on the current Wi-Fi.
   static Future<List<Map<String, dynamic>>> discover() async {
@@ -331,7 +387,10 @@ class PcPowerApp extends StatelessWidget {
       inputDecorationTheme: const InputDecorationTheme(border: OutlineInputBorder()),
     ),
     // Keep every screen, sheet and dialog clear of the phone's own navigation buttons or gesture bar.
-    builder: (context, child) => ColoredBox(color: const Color(0xFF10141A), child: SafeArea(top: false, child: child!)),
+    builder: (context, child) => ColoredBox(
+      color: const Color(0xFF10141A),
+      child: SafeArea(top: false, child: child!),
+    ),
     home: const LegalGate(),
   );
 }
@@ -387,8 +446,8 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> wake(Pc pc) async {
     try {
-      await Api.wake(pc);
-      if (mounted) toast(context, 'Wake signal sent to ${pc.name}. Give it a minute to start.');
+      final msg = await Api.turnOn(pc);
+      if (mounted) toast(context, msg);
     } catch (e) {
       if (mounted) toast(context, '$e');
     }
@@ -650,6 +709,15 @@ class _PcPageState extends State<PcPage> {
   String? nextTurnOn, turnOnError; // the PC's next scheduled turn-on, and why it cannot be set, if so
   bool wifi = false; // the PC is connected by Wi-Fi, which changes what it can be woken from
   bool unpaired = false; // the PC answered, but no longer accepts this phone
+  List<String> busy = []; // why the PC counts as "in use" right now
+  Map? timerNow, waitingNow, idleRule; // one-off timer, postponed schedule, idle rule
+  List<String> skipDates = [];
+  List events = [];
+  String seenEvent = ''; // time of the newest activity entry this phone has shown
+  bool hasSession = true; // someone is signed in on the PC (lock, screen off and mute need that)
+  bool modern = false; // the PC runs 2.5 or newer
+
+  int get unseen => events.where((e) => '${e['t']}'.compareTo(seenEvent) > 0).length;
 
   String? get activePending => pendingAction != null && pendingAt != null && pendingAt!.isAfter(DateTime.now()) ? pendingAction : null;
   bool get waking => wakingUntil != null && wakingUntil!.isAfter(DateTime.now());
@@ -657,6 +725,9 @@ class _PcPageState extends State<PcPage> {
   @override
   void initState() {
     super.initState();
+    SharedPreferences.getInstance().then((p) {
+      if (mounted) setState(() => seenEvent = p.getString('seen_${pc.id}') ?? '');
+    });
     refresh();
     timer = Timer.periodic(const Duration(seconds: 3), (_) => refresh());
     ticker = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -689,6 +760,15 @@ class _PcPageState extends State<PcPage> {
           nextTurnOn = t is Map ? t['next'] : null;
           turnOnError = t is Map && '${t['error'] ?? ''}'.isNotEmpty ? '${t['error']}' : null;
           wifi = st['connection'] == 'wifi';
+          modern = (st['version'] ?? 0) >= 9;
+          final a = st['activity'];
+          busy = a is Map ? [for (final x in a['busy'] ?? []) '$x'] : [];
+          hasSession = a is! Map || a['signedIn'] != false;
+          timerNow = st['timer'] is Map ? st['timer'] : null;
+          waitingNow = st['waiting'] is Map ? st['waiting'] : null;
+          idleRule = st['idle'] is Map ? st['idle'] : null;
+          skipDates = [for (final x in st['skipDates'] ?? []) '$x'];
+          events = st['events'] ?? [];
           final p = st['pending'];
           pendingAction = p is Map ? p['action'] : null;
           pendingAt = p is Map ? DateTime.now().add(Duration(seconds: p['seconds'] ?? 0)) : null;
@@ -712,10 +792,10 @@ class _PcPageState extends State<PcPage> {
 
   Future<void> wake() async {
     try {
-      await Api.wake(pc);
+      final msg = await Api.turnOn(pc);
       if (!mounted) return;
       setState(() => wakingUntil = DateTime.now().add(const Duration(seconds: 60)));
-      toast(context, 'Wake signal sent. It usually takes under a minute to start.');
+      toast(context, msg);
     } catch (e) {
       if (mounted) toast(context, '$e');
     }
@@ -734,7 +814,7 @@ class _PcPageState extends State<PcPage> {
   Future<void> power(String action) async {
     final active = activePending;
     // Asking again for what is already counting down, or cancelling, needs no confirmation.
-    if (action != 'cancel' && action != active) {
+    if (action != 'cancel' && action != active && !sessionLabels.containsKey(action)) {
       // On Wi-Fi a full shut down usually cannot be woken again, so offer Sleep at the moment it matters.
       final warnWifi = wifi && action == 'shutdown';
       // A PC that is fully shut down cannot wake itself for a scheduled turn-on.
@@ -744,11 +824,12 @@ class _PcPageState extends State<PcPage> {
         context: context,
         builder: (ctx) => AlertDialog(
           title: Text(active == null ? '${actionLabels[action]} ${pc.name}?' : 'Replace ${actionLabels[active]!.toLowerCase()} with ${actionLabels[action]!.toLowerCase()}?'),
-          content: active == null && !warnWifi && !warnTurnOn
+          content: active == null && !warnWifi && !warnTurnOn && busy.isEmpty
               ? null
               : Text(
                   [
                     if (active != null) '${actionLabels[active]} is counting down on ${pc.name}. It will be cancelled and ${actionLabels[action]!.toLowerCase()} will happen instead.',
+                    if (busy.isNotEmpty) 'The PC looks like it is in use: ${busy.join('; ').toLowerCase()}. Unsaved work could be lost.',
                     if (warnWifi) 'This PC is on Wi-Fi. After a full shut down you usually cannot turn it on from your phone. Sleep keeps that possible.',
                     if (warnTurnOn) 'This PC is scheduled to turn on at $nextTurnOn. It cannot do that after a full shut down. ${actionLabels[instead]} keeps the schedule working.',
                   ].join('\n\n'),
@@ -773,11 +854,143 @@ class _PcPageState extends State<PcPage> {
     }
   }
 
+  Future<void> startTimer() async {
+    var action = 'shutdown';
+    var minutes = 30;
+    final ok = await showModalBottomSheet<bool>(
+      context: context,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) => Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Turn off after a while', style: Theme.of(ctx).textTheme.titleLarge),
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 8,
+                children: [
+                  for (final a in const ['shutdown', 'sleep', 'hibernate'])
+                    if (a != 'hibernate' || canHibernate) ChoiceChip(label: Text(actionLabels[a]!), selected: action == a, onSelected: (_) => setS(() => action = a)),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  for (final m in const [15, 30, 45, 60, 90, 120, 180])
+                    ChoiceChip(label: Text(m < 60 ? '$m min' : '${m ~/ 60}${m % 60 == 0 ? '' : '½'} h'), selected: minutes == m, onSelected: (_) => setS(() => minutes = m)),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text('The timer runs on the PC, so it still works if your phone goes offline. It happens even if the PC is in use.', style: Theme.of(ctx).textTheme.bodySmall),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Start timer')),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (ok != true) return;
+    try {
+      final msg = await Api.setTimer(pc, action, minutes);
+      if (mounted) toast(context, msg);
+      await refresh();
+    } catch (e) {
+      if (mounted) toast(context, '$e');
+    }
+  }
+
+  Future<void> editIdle() async {
+    var enabled = idleRule?['enabled'] == true;
+    var minutes = (idleRule?['minutes'] ?? 60) as int;
+    var action = '${idleRule?['action'] ?? 'sleep'}';
+    final ok = await showModalBottomSheet<bool>(
+      context: context,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) => Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('When nobody is using the PC', style: Theme.of(ctx).textTheme.titleLarge),
+              SwitchListTile(contentPadding: EdgeInsets.zero, title: const Text('Turn it off automatically'), value: enabled, onChanged: (v) => setS(() => enabled = v)),
+              if (enabled) ...[
+                const Text('After'),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  children: [
+                    for (final m in {15, 30, 60, 120, 180, minutes}.toList()..sort())
+                      ChoiceChip(label: Text(m < 60 ? '$m min' : '${m ~/ 60}${m % 60 == 0 ? '' : '½'} h'), selected: minutes == m, onSelected: (_) => setS(() => minutes = m)),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    for (final a in const ['sleep', 'hibernate', 'shutdown'])
+                      if (a != 'hibernate' || canHibernate) ChoiceChip(label: Text(actionLabels[a]!), selected: action == a, onSelected: (_) => setS(() => action = a)),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Text('It waits while a full-screen app is open, something is keeping the PC awake (like a video or a download), or the network is busy.', style: Theme.of(ctx).textTheme.bodySmall),
+              ],
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save')),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (ok != true) return;
+    run(
+      () => Api.automation(pc, {
+        'idle': {'enabled': enabled, 'minutes': minutes, 'action': action},
+      }),
+      'Saved.',
+    );
+  }
+
+  Future<void> addDayOff() async {
+    final now = DateTime.now();
+    final d = await showDatePicker(context: context, firstDate: now, lastDate: now.add(const Duration(days: 730)), initialDate: now, helpText: 'Schedules skip this day');
+    if (d == null) return;
+    run(
+      () => Api.automation(pc, {
+        'skipDates': {...skipDates, d.toIso8601String().substring(0, 10)}.toList()..sort(),
+      }),
+    );
+  }
+
+  Future<void> markSeen() async {
+    if (events.isEmpty) return;
+    final newest = '${events.last['t']}';
+    if (newest == seenEvent) return;
+    setState(() => seenEvent = newest);
+    (await SharedPreferences.getInstance()).setString('seen_${pc.id}', newest);
+  }
+
   Future<void> addSchedule() async {
     var action = 'shutdown';
     var time = const TimeOfDay(hour: 22, minute: 0);
     final days = <int>{};
     DateTime? date;
+    var force = false;
     final result = await showModalBottomSheet<Map<String, dynamic>>(
       context: context,
       isScrollControlled: true,
@@ -812,17 +1025,26 @@ class _PcPageState extends State<PcPage> {
               if (action == 'wake')
                 Padding(
                   padding: const EdgeInsets.only(bottom: 10),
-                  child: Text('The PC wakes itself at this time, no phone needed. It works when the PC is asleep or hibernating, not after a full shut down, so turn it off with Sleep or Hibernate.', style: Theme.of(ctx).textTheme.bodySmall),
+                  child: Text(
+                    'The PC wakes itself at this time, no phone needed. It works when the PC is asleep or hibernating, not after a full shut down, so turn it off with Sleep or Hibernate.',
+                    style: Theme.of(ctx).textTheme.bodySmall,
+                  ),
                 ),
               if (action == 'shutdown' && schedules.any((x) => x['action'] == 'wake' && x['enabled'] == true))
                 Padding(
                   padding: const EdgeInsets.only(bottom: 10),
-                  child: Text('This PC has a Turn on schedule. After a full shut down it cannot turn itself on. Choose Hibernate or Sleep here to keep that working.', style: Theme.of(ctx).textTheme.bodySmall),
+                  child: Text(
+                    'This PC has a Turn on schedule. After a full shut down it cannot turn itself on. Choose Hibernate or Sleep here to keep that working.',
+                    style: Theme.of(ctx).textTheme.bodySmall,
+                  ),
                 ),
               if (wifi && action == 'shutdown')
                 Padding(
                   padding: const EdgeInsets.only(bottom: 10),
-                  child: Text('This PC is on Wi-Fi: after a scheduled shut down it usually cannot be turned on from your phone. Choose Sleep to keep that possible.', style: Theme.of(ctx).textTheme.bodySmall),
+                  child: Text(
+                    'This PC is on Wi-Fi: after a scheduled shut down it usually cannot be turned on from your phone. Choose Sleep to keep that possible.',
+                    style: Theme.of(ctx).textTheme.bodySmall,
+                  ),
                 ),
               const Text('Repeat on'),
               const SizedBox(height: 6),
@@ -853,6 +1075,14 @@ class _PcPageState extends State<PcPage> {
                     if (d != null) setS(() => date = d);
                   },
                 ),
+              if (action != 'wake' && modern)
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Do it even if the PC is in use'),
+                  subtitle: Text(force ? 'It happens at this time no matter what.' : 'It waits while someone is using the PC, a full-screen app is open or a download is running.'),
+                  value: force,
+                  onChanged: (v) => setS(() => force = v),
+                ),
               const SizedBox(height: 12),
               SizedBox(
                 width: double.infinity,
@@ -864,6 +1094,7 @@ class _PcPageState extends State<PcPage> {
                           'time': '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}',
                           'days': days.toList()..sort(),
                           'date': date?.toIso8601String().substring(0, 10) ?? '',
+                          'whenBusy': force ? 'force' : 'wait',
                         }),
                   child: const Text('Add schedule'),
                 ),
@@ -903,6 +1134,19 @@ class _PcPageState extends State<PcPage> {
               decoration: const InputDecoration(labelText: 'MAC address (used to turn it on)'),
               autocorrect: false,
             ),
+            if (Store.pcs.length > 1)
+              StatefulBuilder(
+                builder: (ctx, setW) => SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Home-screen widget turns on this PC'),
+                  value: Store.widgetPc?.id == pc.id,
+                  onChanged: (v) {
+                    Store.widgetPcId = v ? pc.id : '';
+                    Store.save();
+                    setW(() {});
+                  },
+                ),
+              ),
             const SizedBox(height: 12),
             SizedBox(
               width: double.infinity,
@@ -1038,6 +1282,35 @@ class _PcPageState extends State<PcPage> {
                       padding: const EdgeInsets.only(top: 8),
                       child: Text('Hibernate is turned off in Windows on this PC.', style: Theme.of(context).textTheme.bodySmall),
                     ),
+                  if (on && modern)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final a in sessionLabels.entries) TextButton(onPressed: hasSession ? () => power(a.key) : null, child: Text(a.value)),
+                          TextButton.icon(onPressed: startTimer, icon: const Icon(Icons.hourglass_bottom, size: 18), label: const Text('Timer')),
+                        ],
+                      ),
+                    ),
+                  if (on && modern && !hasSession)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text('Nobody is signed in on the PC, so Lock, Screen off and Mute have nothing to act on.', style: Theme.of(context).textTheme.bodySmall),
+                    ),
+                  if (on && busy.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(Icons.person_outline, size: 16, color: Colors.amber),
+                          const SizedBox(width: 6),
+                          Expanded(child: Text('In use: ${busy.join('; ').toLowerCase()}', style: Theme.of(context).textTheme.bodySmall)),
+                        ],
+                      ),
+                    ),
                   if (on && (nextTurnOn != null || turnOnError != null))
                     Padding(
                       padding: const EdgeInsets.only(top: 10),
@@ -1046,7 +1319,12 @@ class _PcPageState extends State<PcPage> {
                         children: [
                           Icon(Icons.alarm, size: 18, color: turnOnError == null ? accent : Theme.of(context).colorScheme.error),
                           const SizedBox(width: 8),
-                          Expanded(child: Text(turnOnError != null ? 'Scheduled turn-on cannot be set on this PC: $turnOnError' : 'Turns itself on at $nextTurnOn, if it is asleep or hibernating then.', style: Theme.of(context).textTheme.bodySmall)),
+                          Expanded(
+                            child: Text(
+                              turnOnError != null ? 'Scheduled turn-on cannot be set on this PC: $turnOnError' : 'Turns itself on at $nextTurnOn, if it is asleep or hibernating then.',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -1058,7 +1336,12 @@ class _PcPageState extends State<PcPage> {
                         children: [
                           const Icon(Icons.wifi, size: 18, color: accent),
                           const SizedBox(width: 8),
-                          Expanded(child: Text('This PC is on Wi-Fi. Use Sleep if you want to turn it on again from your phone; a full shut down usually cannot be woken over Wi-Fi.', style: Theme.of(context).textTheme.bodySmall)),
+                          Expanded(
+                            child: Text(
+                              'This PC is on Wi-Fi. Use Sleep if you want to turn it on again from your phone; a full shut down usually cannot be woken over Wi-Fi.',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -1079,6 +1362,24 @@ class _PcPageState extends State<PcPage> {
                 title: Text('${actionLabels[activePending]} in ${pendingAt!.difference(DateTime.now()).inSeconds + 1} seconds', style: const TextStyle(fontWeight: FontWeight.w600)),
                 subtitle: const Text('Tap another button to replace it'),
                 trailing: FilledButton(onPressed: () => power('cancel'), child: const Text('Cancel')),
+              ),
+            ),
+          if (on && timerNow != null)
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.hourglass_bottom, color: accent),
+                title: Text('${actionLabels[timerNow!['action']] ?? timerNow!['action']} at ${timerNow!['at']}'),
+                subtitle: Text('Timer, in about ${(((timerNow!['seconds'] ?? 0) as int) / 60).ceil()} min'),
+                trailing: TextButton(onPressed: () => run(() => Api.cancelTimer(pc), 'Timer cancelled.'), child: const Text('Cancel')),
+              ),
+            ),
+          if (on && waitingNow != null)
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.pause_circle_outline, color: Colors.amber),
+                title: Text('Scheduled ${(actionLabels[waitingNow!['action']] ?? '${waitingNow!['action']}').toLowerCase()} is waiting'),
+                subtitle: Text('${waitingNow!['reason']}. It happens once the PC is free.'),
+                trailing: TextButton(onPressed: () => power('cancel'), child: const Text('Cancel')),
               ),
             ),
           Padding(
@@ -1104,7 +1405,7 @@ class _PcPageState extends State<PcPage> {
                     '${s['time']}  ${scheduleLabels[s['action']] ?? s['action']}',
                     style: TextStyle(fontWeight: FontWeight.w600, decoration: s['enabled'] == true ? null : TextDecoration.lineThrough),
                   ),
-                  subtitle: Text(scheduleWhen(s)),
+                  subtitle: Text(scheduleWhen(s) + (s['whenBusy'] == 'force' ? ' · even if in use' : '')),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -1114,6 +1415,75 @@ class _PcPageState extends State<PcPage> {
                   ),
                 ),
               ),
+          if (on && modern) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 12, 4),
+              child: Text('AUTOMATIC', style: Theme.of(context).textTheme.labelMedium?.copyWith(letterSpacing: 1.2)),
+            ),
+            Card(
+              child: Column(
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.bedtime_outlined),
+                    title: const Text('When nobody is using the PC'),
+                    subtitle: Text(idleRule?['enabled'] == true ? '${actionLabels[idleRule!['action']] ?? idleRule!['action']} after ${idleRule!['minutes']} minutes' : 'Off'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: editIdle,
+                  ),
+                  const Divider(height: 1),
+                  ListTile(
+                    leading: const Icon(Icons.event_busy_outlined),
+                    title: const Text('Days off'),
+                    subtitle: Text(skipDates.isEmpty ? 'Repeating schedules run every chosen day. Add holidays here to skip them.' : 'Repeating schedules skip these days'),
+                    trailing: IconButton(icon: const Icon(Icons.add), tooltip: 'Add a day off', onPressed: addDayOff),
+                  ),
+                  if (skipDates.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Wrap(
+                          spacing: 6,
+                          runSpacing: 4,
+                          children: [
+                            for (final d in skipDates) InputChip(label: Text(d), onDeleted: () => run(() => Api.automation(pc, {'skipDates': skipDates.where((x) => x != d).toList()}))),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 12, 4),
+              child: Row(
+                children: [
+                  Text('ACTIVITY', style: Theme.of(context).textTheme.labelMedium?.copyWith(letterSpacing: 1.2)),
+                  if (unseen > 0) ...[const SizedBox(width: 8), Badge(label: Text('$unseen new'))],
+                  const Spacer(),
+                  if (unseen > 0) IconButton(onPressed: markSeen, icon: const Icon(Icons.done_all), tooltip: 'Mark as read'),
+                ],
+              ),
+            ),
+            if (events.isEmpty)
+              const Padding(padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8), child: Text('Nothing yet.'))
+            else
+              Card(
+                child: Column(
+                  children: [
+                    for (final e in events.reversed.take(12))
+                      ListTile(
+                        dense: true,
+                        leading: Icon(Icons.circle, size: 8, color: '${e['t']}'.compareTo(seenEvent) > 0 ? accent : Colors.white24),
+                        title: Text('${e['text']}'),
+                        subtitle: Text('${e['t']}'.length >= 16 ? '${e['t']}'.substring(0, 16).replaceFirst('T', '  ') : '${e['t']}'),
+                      ),
+                  ],
+                ),
+              ),
+          ],
+          if (on && !modern && !unpaired)
+            const Padding(padding: EdgeInsets.fromLTRB(20, 16, 20, 0), child: Text('Update PC Power on this PC to get timers, automatic rules, Lock and the activity list.')),
         ],
       ),
     );
@@ -1131,7 +1501,8 @@ class HelpPage extends StatelessWidget {
       [
         'Run PCPower.exe on the Windows PC. If Windows warns about an unknown app, choose More info, then Run anyway.',
         'When Windows Firewall asks, choose Allow on private networks.',
-        'In the PC Power window, tick "Start PC Power when I sign in to Windows" and press Save.',
+        'In the PC Power window, press "Install PC Power" and approve the Windows prompt. PC Power then runs before anyone signs in, so schedules always run and a PC you turned on from here can be turned off again.',
+        'To remove it later: Windows Settings > Apps > Installed apps > PC Power > Uninstall.',
       ],
     ),
     (
@@ -1184,8 +1555,29 @@ class HelpPage extends StatelessWidget {
         'Pressing a different button during the countdown replaces it. You are asked first.',
         'Pressing the same button again changes nothing; the countdown carries on.',
         'Sleep and Hibernate: happen straight away and cancel any countdown first.',
+        'Lock, Screen off and Mute: happen straight away. They need someone to be signed in on the PC.',
+        'Timer: turns the PC off after the time you pick. It runs on the PC, so it works even if this phone goes offline.',
+        'If the PC looks like it is in use, the app tells you why before it turns it off.',
         'Schedules are stored on the PC and run even when this phone is away. A schedule never interrupts a countdown already running, and two schedules cannot share the same time on the same day.',
         'A Turn on schedule makes the PC wake itself at that time. It works from Sleep or Hibernate, not after a full shut down, so pair it with a Sleep or Hibernate schedule. On laptops it may only work while plugged in.',
+      ],
+    ),
+    (
+      'Automatic rules and schedules',
+      [
+        'A scheduled turn-off waits while the PC is in use: someone used the keyboard or mouse in the last few minutes, a full-screen app is open, a program is keeping the PC awake, or a download is running. It happens once the PC is free, and gives up after three hours. Tick "Do it even if the PC is in use" on a schedule to skip the wait.',
+        '"When nobody is using the PC" turns it off after the idle time you choose.',
+        'Days off: repeating schedules skip the dates you add, for example public holidays.',
+        'Activity shows what happened on the PC and who asked for it. New entries are marked when you open the PC in this app. The app cannot send notifications while it is closed: that needs an online service, which PC Power does not have yet.',
+      ],
+    ),
+    (
+      'Turn on without opening the app',
+      [
+        'Widget: long-press an empty spot on your home screen, tap Widgets, find PC Power and drag "Turn on PC" to the home screen.',
+        'Quick tile: swipe down twice from the top of the screen, tap the pencil (Edit), and drag "Turn on PC" into your tiles.',
+        'With more than one PC, open the PC you want, tap the gear icon and switch on "Home-screen widget turns on this PC".',
+        'More than one PC at home? When you press Turn on, the app also asks any other paired PC that is on to send the wake signal. That works even when your phone is away from home, as long as it can reach that other PC.',
       ],
     ),
     (
@@ -1207,7 +1599,12 @@ class HelpPage extends StatelessWidget {
       appBar: AppBar(
         title: const Text('How to set up'),
         backgroundColor: Colors.transparent,
-        actions: [TextButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const LegalPage())), child: const Text('Legal'))],
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const LegalPage())),
+            child: const Text('Legal'),
+          ),
+        ],
       ),
       body: ListView(
         padding: const EdgeInsets.only(bottom: 30),
@@ -1316,7 +1713,8 @@ class _AwayPageState extends State<AwayPage> {
           wakeResult = 'The signal arrived, but from inside your own network, so it proves nothing. Switch this phone to mobile data (Wi-Fi off) and send the test again.';
         } else {
           wakeOk = false;
-          wakeResult = 'The signal did not arrive. Check the port forward (step 3), that the port number here matches, and step 1: your internet provider may not give your router a reachable address.';
+          wakeResult =
+              'The signal did not arrive. Check the port forward (step 3), that the port number here matches, and step 1: your internet provider may not give your router a reachable address.';
         }
       });
     } catch (e) {
@@ -1356,7 +1754,10 @@ class _AwayPageState extends State<AwayPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: accent)),
+          Text(
+            title,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: accent),
+          ),
           const SizedBox(height: 8),
           ...children,
         ],
@@ -1366,7 +1767,13 @@ class _AwayPageState extends State<AwayPage> {
 
   Widget line(String t) => Padding(
     padding: const EdgeInsets.only(bottom: 8),
-    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('•  '), Expanded(child: Text(t))]),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('•  '),
+        Expanded(child: Text(t)),
+      ],
+    ),
   );
 
   Widget result(bool? ok, String? text) => text == null
@@ -1376,7 +1783,19 @@ class _AwayPageState extends State<AwayPage> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(ok == true ? Icons.check_circle : ok == false ? Icons.error_outline : Icons.info_outline, size: 20, color: ok == true ? accent : ok == false ? Theme.of(context).colorScheme.error : Colors.grey),
+              Icon(
+                ok == true
+                    ? Icons.check_circle
+                    : ok == false
+                    ? Icons.error_outline
+                    : Icons.info_outline,
+                size: 20,
+                color: ok == true
+                    ? accent
+                    : ok == false
+                    ? Theme.of(context).colorScheme.error
+                    : Colors.grey,
+              ),
               const SizedBox(width: 8),
               Expanded(child: Text(text)),
             ],
@@ -1395,12 +1814,17 @@ class _AwayPageState extends State<AwayPage> {
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
-              child: Text('Schedules already run wherever you are. These steps are only for turning ${pc.name} on, or controlling it, when your phone is not on the home network. You set this up once, on your router.', style: small),
+              child: Text(
+                'Schedules already run wherever you are. These steps are only for turning ${pc.name} on, or controlling it, when your phone is not on the home network. You set this up once, on your router.',
+                style: small,
+              ),
             ),
             step('1. Check your connection can be reached', [
               line('Log in to your router and find its internet (WAN) address.'),
               line('On a device at home, search the web for "what is my IP".'),
-              line('If the two addresses match, carry on. If they differ, your internet provider shares one address between several homes and this cannot work. Ask them for a public IP address, or use a VPN service instead.'),
+              line(
+                'If the two addresses match, carry on. If they differ, your internet provider shares one address between several homes and this cannot work. Ask them for a public IP address, or use a VPN service instead.',
+              ),
             ]),
             step('2. Give the PC a fixed address', [
               line('In the router, find DHCP reservation (also called static lease or address reservation).'),
@@ -1409,13 +1833,21 @@ class _AwayPageState extends State<AwayPage> {
             step('3. Let the wake signal in', [
               line('In the router, open port forwarding (also called virtual server or NAT).'),
               line('Add a rule: protocol UDP, outside port any number you choose between 20000 and 60000, inside address $broadcast, inside port 9.'),
-              line('If the router refuses $broadcast, use ${pc.host} instead. Then also look for "static ARP" or "bind IP to MAC" and add ${pc.host} there, or the router will forget the PC once it has been off for a while.'),
-              line('Pick an unusual outside port, not 7 or 9. The wake signal has no password, so an unusual port keeps strangers from stumbling on it. All anyone could do with it is turn the PC on.'),
+              line(
+                'If the router refuses $broadcast, use ${pc.host} instead. Then also look for "static ARP" or "bind IP to MAC" and add ${pc.host} there, or the router will forget the PC once it has been off for a while.',
+              ),
+              line(
+                'Pick an unusual outside port, not 7 or 9. The wake signal has no password, so an unusual port keeps strangers from stumbling on it. All anyone could do with it is turn the PC on.',
+              ),
             ]),
             step('4. Enter your details and test', [
               TextField(
                 controller: host,
-                decoration: const InputDecoration(labelText: 'Public IP address or DDNS name', helperText: 'Your public address can change. A free DDNS name from your router keeps up with it.', helperMaxLines: 3),
+                decoration: const InputDecoration(
+                  labelText: 'Public IP address or DDNS name',
+                  helperText: 'Your public address can change. A free DDNS name from your router keeps up with it.',
+                  helperMaxLines: 3,
+                ),
                 autocorrect: false,
                 keyboardType: TextInputType.url,
               ),
@@ -1441,7 +1873,9 @@ class _AwayPageState extends State<AwayPage> {
               line('Safest: use a VPN into your home network (WireGuard on your router, or Tailscale on the PC and phone). Then this step is not needed and nothing extra is opened.'),
               line('Otherwise add a second forwarding rule: protocol TCP, outside port another number between 20000 and 60000, inside address ${pc.host}, inside port ${pc.port}.'),
               line('In the PC Power window on the PC, switch off "Only accept phones on my own network".'),
-              line('What protects it: the connection is encrypted, this phone only talks to the PC it was paired with, and the PC only obeys paired phones. Pairing a new phone never works from outside.'),
+              line(
+                'What protects it: the connection is encrypted, this phone only talks to the PC it was paired with, and the PC only obeys paired phones. Pairing a new phone never works from outside.',
+              ),
               TextField(
                 controller: ctlPort,
                 decoration: const InputDecoration(labelText: 'Outside port for control (leave empty if not used)'),
@@ -1511,16 +1945,35 @@ class _LegalGateState extends State<LegalGate> {
                     const SizedBox(height: 14),
                     const Text('Only use it on computers you own or are allowed to manage.'),
                     const SizedBox(height: 18),
-                    OutlinedButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const LegalDocPage(title: 'Terms of Use', sections: termsOfUse))), child: const Text('Read the Terms of Use')),
+                    OutlinedButton(
+                      onPressed: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const LegalDocPage(title: 'Terms of Use', sections: termsOfUse),
+                        ),
+                      ),
+                      child: const Text('Read the Terms of Use'),
+                    ),
                     const SizedBox(height: 8),
-                    OutlinedButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const LegalDocPage(title: 'Privacy Policy', sections: privacyPolicy))), child: const Text('Read the Privacy Policy')),
+                    OutlinedButton(
+                      onPressed: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const LegalDocPage(title: 'Privacy Policy', sections: privacyPolicy),
+                        ),
+                      ),
+                      child: const Text('Read the Privacy Policy'),
+                    ),
                   ],
                 ),
               ),
               const SizedBox(height: 12),
               Text('By tapping "I agree" you accept the Terms of Use and the Privacy Policy.', style: Theme.of(context).textTheme.bodySmall),
               const SizedBox(height: 10),
-              SizedBox(width: double.infinity, child: FilledButton(onPressed: agree, child: const Text('I agree'))),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(onPressed: agree, child: const Text('I agree')),
+              ),
             ],
           ),
         ),
@@ -1533,13 +1986,31 @@ class LegalPage extends StatelessWidget {
   const LegalPage({super.key});
   @override
   Widget build(BuildContext context) {
-    Widget tile(String title, VoidCallback onTap) => Card(child: ListTile(title: Text(title), trailing: const Icon(Icons.chevron_right), onTap: onTap));
+    Widget tile(String title, VoidCallback onTap) => Card(
+      child: ListTile(title: Text(title), trailing: const Icon(Icons.chevron_right), onTap: onTap),
+    );
     return Scaffold(
       appBar: AppBar(title: const Text('Legal'), backgroundColor: Colors.transparent),
       body: ListView(
         children: [
-          tile('Terms of Use', () => Navigator.push(context, MaterialPageRoute(builder: (_) => const LegalDocPage(title: 'Terms of Use', sections: termsOfUse)))),
-          tile('Privacy Policy', () => Navigator.push(context, MaterialPageRoute(builder: (_) => const LegalDocPage(title: 'Privacy Policy', sections: privacyPolicy)))),
+          tile(
+            'Terms of Use',
+            () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => const LegalDocPage(title: 'Terms of Use', sections: termsOfUse),
+              ),
+            ),
+          ),
+          tile(
+            'Privacy Policy',
+            () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => const LegalDocPage(title: 'Privacy Policy', sections: privacyPolicy),
+              ),
+            ),
+          ),
           tile('Open-source licences', () => showLicensePage(context: context, applicationName: 'PC Power')),
         ],
       ),
@@ -1562,7 +2033,10 @@ class LegalDocPage extends StatelessWidget {
           for (final (heading, paragraphs) in sections) ...[
             Padding(
               padding: const EdgeInsets.only(top: 22, bottom: 8),
-              child: Text(heading, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: accent)),
+              child: Text(
+                heading,
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: accent),
+              ),
             ),
             for (final p in paragraphs)
               Padding(
