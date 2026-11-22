@@ -1,0 +1,75 @@
+# PC Power: Privacy Policy
+
+Effective 22 November 2026
+
+## Summary
+
+PC Power does not collect, receive or sell any information about you. It has no accounts, no adverts, no analytics and no tracking. Everything it needs stays on your own phone and computer.
+
+## 1. Who we are
+
+PC Power is published by Mogamat Muneer Miller, Cape Town, South Africa. For the purposes of South Africa's Protection of Personal Information Act (POPIA), we are the responsible party for the app, although we do not receive any personal information through it. Contact: muneermilleror@gmail.com
+
+## 2. Information we collect
+
+None. PC Power does not send any information to us or to anyone else. We have no server that the app talks to, and we cannot see your devices, your schedules or how you use the app.
+
+## 3. Information kept on your own devices
+
+To work, PC Power keeps some technical details on your devices. They never leave your devices except when your phone and your computer talk directly to each other.
+
+On your phone: the names of the computers you paired; their network addresses (IP address, hardware "MAC" address and, if you enter one, your public address or DDNS name); a fingerprint of each computer's security certificate; and an access key for each computer, kept in your phone's encrypted storage. These are excluded from Android backups.
+
+On your computer: the computer's name; the pairing code; your schedules; the name and pairing date of each paired phone, with a scrambled (hashed) copy of its access key; the security certificate the app created; and a log file listing recent actions and the network addresses they came from. The log is replaced each time the app starts.
+
+## 4. How the apps communicate
+
+Your phone and computer talk directly to each other over your own network, using an encrypted connection. If you set up access from outside your home, they talk directly over the internet in the same encrypted way.
+
+To find computers and to turn them on, the phone sends small signals on your local network. The turn-on signal contains the computer's hardware address and is not encrypted; that is how the Wake-on-LAN standard works.
+
+Your internet provider and network equipment can see that devices are communicating, as with any app, but not what is said over the encrypted connection.
+
+## 5. Permissions
+
+The Android app asks only for network access, which it needs to reach your computers. It does not ask for your location, contacts, camera, microphone, files or any other personal data.
+
+The Windows app listens on your network so that paired phones can reach it. With your approval, it can change the Windows power and network-card settings described in the app.
+
+## 6. Sharing
+
+We do not share your information with anyone, because we do not have it. PC Power contains no third-party advertising or analytics software.
+
+## 7. Keeping and deleting information
+
+The information stays on your devices for as long as you keep the app. To delete it: remove a computer in the phone app, remove a phone in the PC Power window, or uninstall the app. On Windows, uninstalling means: untick "Start PC Power when I sign in to Windows", quit the app, then delete the program and the folder named PCPower in your user profile's AppData\Roaming folder.
+
+## 8. Security
+
+The connection between phone and computer is encrypted, each phone has its own access key that you can remove, and pairing a new phone only works on your own network. No system is perfectly secure; see the Terms of Use for the precautions we ask you to take.
+
+## 9. Children
+
+PC Power is a general utility and is not aimed at children. It does not knowingly collect information from anyone, including children.
+
+## 10. Your rights
+
+Privacy laws such as POPIA in South Africa and the GDPR in Europe give you rights over personal information that organisations hold about you, including to see it, correct it or have it deleted. Because we hold no information about you, there is nothing for us to provide or delete, but you are welcome to contact us with any question.
+
+If you believe your privacy rights have been infringed, South African residents may complain to the Information Regulator (inforegulator.org.za). People elsewhere may contact their local data protection authority.
+
+## 11. Information for specific regions
+
+European Economic Area, United Kingdom and Switzerland: under the GDPR and UK GDPR we would be the "controller" of any personal data we handled, but we handle none: the app does not send us or anyone else personal data. Nothing is transferred to another country by us, and we carry out no profiling or automated decision-making. You have the rights described in section 10 and may complain to the data protection authority in your country.
+
+United States, including California: we do not collect, sell or share personal information as those terms are used in the California Consumer Privacy Act and similar state laws, and we do not use it for advertising. PC Power is not directed at children under 13 and collects no information from them.
+
+Brazil, Canada, Australia, New Zealand and other countries with privacy laws: the same is true everywhere. We do not collect or receive your personal information, so we do not store it, disclose it or move it across borders.
+
+## 12. Changes to this policy
+
+If PC Power changes in a way that affects your privacy, for example if an optional online service is added in future, we will update this policy first and the app will ask you to agree again before that feature is used.
+
+## 13. Contact
+
+Mogamat Muneer Miller, Cape Town, South Africa. Email: muneermilleror@gmail.com
