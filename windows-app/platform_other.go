@@ -3,9 +3,12 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"time"
 )
 
@@ -59,3 +62,44 @@ func wakeArm(t time.Time) error {
 }
 
 func wakeKeepOn(time.Duration) {}
+
+// ---- everything below stands in for Windows-only features, so the core can be run and tested anywhere ----
+
+const installSupported = false
+
+func installStart() error { return fmt.Errorf("only available on Windows") }
+
+func platformMain() {
+	background := flag.Bool("background", false, "start without opening the window")
+	flag.Parse()
+	dataDir = userDataDir()
+	portableMain(*background)
+}
+
+// Tests set these to imitate a PC that is being used.
+func envInt(name string, def int) int {
+	if v, err := strconv.Atoi(os.Getenv(name)); err == nil {
+		return v
+	}
+	return def
+}
+
+func sessionIdleSeconds() int {
+	if _, err := os.Stat("/tmp/pcpower-not-busy"); err == nil { // lets a test end the "in use" state
+		return 3600
+	}
+	return envInt("PCPOWER_FAKE_IDLE", 3600)
+}
+func sessionFullscreen() bool { return os.Getenv("PCPOWER_FAKE_FULLSCREEN") == "1" }
+func sessionRun(cmd string)   { log.Printf("session action: %s", cmd) }
+
+func powerRequests() []string {
+	if b := os.Getenv("PCPOWER_FAKE_BLOCKER"); b != "" {
+		if _, err := os.Stat("/tmp/pcpower-not-busy"); err != nil { // lets a test end the "busy" state
+			return []string{b}
+		}
+	}
+	return nil
+}
+
+func netBytes() (uint64, bool) { return 0, false }

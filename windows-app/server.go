@@ -12,6 +12,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/hmac"
@@ -27,7 +28,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -229,11 +229,11 @@ func phone(h http.HandlerFunc) http.HandlerFunc {
 		}
 		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		got := []byte(tokenHash(tok))
-		id := ""
+		id, name := "", ""
 		mu.Lock()
 		for _, d := range cfg.Devices { // compare against every device so timing reveals nothing
 			if subtle.ConstantTimeCompare(got, []byte(d.TokenHash)) == 1 {
-				id = d.ID
+				id, name = d.ID, d.Name
 			}
 		}
 		if id != "" {
@@ -247,8 +247,18 @@ func phone(h http.HandlerFunc) http.HandlerFunc {
 			fail(w, http.StatusUnauthorized, "This phone is not paired with this PC. Pair it again.")
 			return
 		}
-		h(w, r)
+		h(w, r.WithContext(context.WithValue(r.Context(), whoKey{}, name)))
 	}
+}
+
+type whoKey struct{}
+
+// who names the requester for the activity log: a paired phone's name, or "this PC".
+func who(r *http.Request) string {
+	if n, ok := r.Context().Value(whoKey{}).(string); ok && n != "" {
+		return n
+	}
+	return "this PC"
 }
 
 // local wraps a handler for this PC's own window. The server is bound to 127.0.0.1, and on top of that:
@@ -267,6 +277,12 @@ func local(h http.HandlerFunc) http.HandlerFunc {
 			fail(w, http.StatusForbidden, "Not allowed")
 			return
 		}
+		// The key is only readable by the user PC Power was set up for, so other accounts on a shared
+		// PC cannot control it through this local port.
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-PCPower-Key")), []byte(localKey)) != 1 || localKey == "" {
+			fail(w, http.StatusUnauthorized, "Open PC Power from its tray icon or the Start menu.")
+			return
+		}
 		h(w, r)
 	}
 }
@@ -277,14 +293,29 @@ func status() map[string]any {
 	ip, mac, bc := netInfo()
 	hib := canHibernate()
 	conn := wolCheck(false).Connection
+	activity := activityView()
 	mu.Lock()
 	defer mu.Unlock()
+	var timer, wait any
+	if cfg.Timer != nil {
+		if at, err := time.Parse(time.RFC3339, cfg.Timer.At); err == nil {
+			timer = map[string]any{"action": cfg.Timer.Action, "seconds": int(time.Until(at).Seconds()) + 1, "at": at.Format("15:04")}
+		}
+	}
+	if waiting != nil {
+		wait = map[string]any{"action": waiting.Action, "reason": waiting.Reason}
+	}
+	events := cfg.Events
+	if len(events) > 30 {
+		events = events[len(events)-30:]
+	}
 	var pend any
 	if p := pendingNow(); p != nil {
 		pend = map[string]any{"action": p.Action, "seconds": int(time.Until(p.At).Seconds()) + 1}
 	}
-	return map[string]any{"app": "pcpower", "version": 8, "name": cfg.Name, "ip": ip, "mac": mac, "broadcast": bc, "port": cfg.Port,
-		"time": time.Now().Format("15:04"), "schedules": cfg.Schedules, "pending": pend, "canHibernate": hib, "connection": conn, "wakeTest": wakeTestStatus(), "turnOn": wakeInfo()}
+	return map[string]any{"app": "pcpower", "version": 9, "name": cfg.Name, "ip": ip, "mac": mac, "broadcast": bc, "port": cfg.Port,
+		"time": time.Now().Format("15:04"), "schedules": cfg.Schedules, "pending": pend, "canHibernate": hib, "connection": conn, "wakeTest": wakeTestStatus(), "turnOn": wakeInfo(),
+		"activity": activity, "timer": timer, "waiting": wait, "idle": cfg.Idle, "skipDates": cfg.SkipDates, "events": events}
 }
 
 func hStatus(w http.ResponseWriter, r *http.Request) { reply(w, 200, status()) }
@@ -292,15 +323,35 @@ func hStatus(w http.ResponseWriter, r *http.Request) { reply(w, 200, status()) }
 func hPower(w http.ResponseWriter, r *http.Request) {
 	var b struct{ Action string }
 	json.NewDecoder(r.Body).Decode(&b)
+	if label, ok := sessionActions[b.Action]; ok {
+		if err := sessionDo(b.Action); err != nil {
+			fail(w, http.StatusConflict, err.Error())
+			return
+		}
+		addEvent("power", label+", from "+who(r))
+		reply(w, 200, map[string]any{"ok": true, "message": label + " sent."})
+		return
+	}
 	if !actions[b.Action] && b.Action != "cancel" {
 		fail(w, 400, "Unknown action")
 		return
 	}
-	log.Printf("request from %s: %s", r.RemoteAddr, b.Action)
+	mu.Lock()
+	hadWaiting := waiting != nil
+	waiting = nil // a person has taken over: drop any postponed schedule
+	mu.Unlock()
 	msg, err := requestPower(b.Action, true)
 	if err != nil {
 		fail(w, http.StatusConflict, err.Error())
 		return
+	}
+	if b.Action == "cancel" {
+		if hadWaiting {
+			msg = "Postponed schedule cancelled. " + msg
+		}
+		addEvent("power", "Cancelled, from "+who(r))
+	} else {
+		addEvent("power", labels[b.Action]+", from "+who(r))
 	}
 	reply(w, 200, map[string]any{"ok": true, "message": msg})
 }
@@ -329,6 +380,9 @@ func hAddSchedule(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		s.Date = ""
+	}
+	if s.WhenBusy != "force" || s.Action == "wake" {
+		s.WhenBusy = "wait"
 	}
 	s.ID, s.Days, s.Enabled, s.LastFired = newID(), days, true, ""
 	mu.Lock()
@@ -378,6 +432,10 @@ func common(m *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
 	m.HandleFunc("POST /api/schedules", wrap(hAddSchedule))
 	m.HandleFunc("PATCH /api/schedules/{id}", wrap(hChangeSchedule))
 	m.HandleFunc("DELETE /api/schedules/{id}", wrap(hChangeSchedule))
+	m.HandleFunc("POST /api/timer", wrap(hTimer))
+	m.HandleFunc("DELETE /api/timer", wrap(hTimer))
+	m.HandleFunc("PUT /api/automation", wrap(hAutomation))
+	m.HandleFunc("POST /api/wake-peer", wrap(hWakePeer))
 }
 
 // ---- phone-facing server ----
@@ -421,7 +479,7 @@ func hPair(w http.ResponseWriter, r *http.Request) {
 	d := Device{ID: newID(), Name: name, TokenHash: tokenHash(token), Added: time.Now().Format("2006-01-02 15:04")}
 	cfg.Devices = append(cfg.Devices, d)
 	saveConfig()
-	log.Printf("paired new phone %q from %s", name, ip)
+	addEventLocked("pair", fmt.Sprintf("New phone paired: %s", name))
 	reply(w, 200, map[string]any{"deviceId": d.ID, "token": token, "name": cfg.Name,
 		"proof": base64.StdEncoding.EncodeToString(mac256(key, []byte("pcpower-pair-server-v1"), nonce, []byte(token)))})
 }
@@ -471,6 +529,20 @@ func localRoutes() http.Handler {
 		w.Write(bytes.Replace(indexHTML, []byte("<!--LEGAL-->"), legalHTML, 1))
 	})
 	common(m, local)
+	m.HandleFunc("POST /api/local/presence", local(hPresence))
+	// Portable copy only: install PC Power properly, as a Windows service. Windows asks for approval.
+	m.HandleFunc("POST /api/local/install", local(func(w http.ResponseWriter, r *http.Request) {
+		if serviceMode || !installSupported {
+			fail(w, 400, "PC Power is already installed.")
+			return
+		}
+		if err := installStart(); err != nil {
+			fail(w, 500, "Could not start the installer: "+err.Error())
+			return
+		}
+		reply(w, 200, map[string]bool{"ok": true})
+		go func() { time.Sleep(700 * time.Millisecond); os.Exit(0) }() // free the ports for the service
+	}))
 	m.HandleFunc("GET /api/local", local(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		devs := make([]map[string]any, 0, len(cfg.Devices))
@@ -482,6 +554,7 @@ func localRoutes() http.Handler {
 			devs = append(devs, map[string]any{"id": d.ID, "name": d.Name, "added": d.Added, "lastSeen": seen})
 		}
 		out := map[string]any{"code": prettyCode(cfg.Token), "lanOnly": *cfg.LanOnly, "devices": devs, "termsAccepted": cfg.Accepted == legalVersion,
+			"installed": serviceMode, "canInstall": installSupported && !serviceMode,
 			"fingerprint": hex.EncodeToString(certFP[:8])}
 		mu.Unlock()
 		out["autostart"], out["autostartSupported"] = autostartGet(), autostartSupported
@@ -562,21 +635,38 @@ func hardened(h http.Handler) *http.Server {
 		ErrorLog: log.New(io.Discard, "", 0)} // TLS probes from scanners would otherwise flood the log
 }
 
-func main() {
-	background := flag.Bool("background", false, "start in the tray without opening the window")
-	flag.Parse()
-	loadConfig()
-	dir := filepath.Dir(cfgPath)
-	if lf, err := os.OpenFile(filepath.Join(dir, "pcpower.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil && os.Getenv("PCPOWER_CONFIG") == "" {
-		log.SetOutput(lf)
+var (
+	dataDir     string // where config, certificate, log and the local key live
+	localKey    string // required on every call to the local (127.0.0.1) API
+	serviceMode bool   // the core is running as the Windows service
+)
+
+// startCore loads the settings and starts everything that does the real work: both servers, the
+// scheduler and the listeners. It returns an error if PC Power is already running.
+func startCore() error {
+	if p := os.Getenv("PCPOWER_CONFIG"); p != "" {
+		dataDir = filepath.Dir(p)
 	}
+	loadConfig()
 	localLn, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", cfg.LocalPort))
 	if err != nil {
-		// Almost always: PC Power is already running. Show its window instead of starting twice.
-		openWindow(localURL())
-		return
+		return err
 	}
-	cert, err := loadOrCreateCert(dir)
+	if lf, err := os.OpenFile(filepath.Join(dataDir, "pcpower.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil && os.Getenv("PCPOWER_CONFIG") == "" {
+		log.SetOutput(lf)
+	}
+	// In service mode the installer made the key file and limited who may read it, so keep that key.
+	if _, k := readKeyFile(dataDir); serviceMode && k != "" {
+		localKey = k
+	} else {
+		raw := make([]byte, 24)
+		rand.Read(raw)
+		localKey = base64.RawURLEncoding.EncodeToString(raw)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "local.key"), []byte(fmt.Sprintf("%d:%s", cfg.LocalPort, localKey)), 0o600); err != nil {
+		log.Printf("cannot write the local key: %v", err)
+	}
+	cert, err := loadOrCreateCert(dataDir)
 	if err != nil {
 		log.Fatalf("cannot create the encryption certificate: %v", err)
 	}
@@ -601,18 +691,59 @@ func main() {
 			time.Sleep(5 * time.Second)
 		}
 	}()
-	if autostartGet() {
-		autostartSet(true)
-	}
 	go scheduler()
 	go discovery()
 	go wakeListener()
 	go wakeLoop()
-	if !*background {
-		openWindow(localURL())
+	go netSampler()
+	addEvent("start", "PC Power started (the PC is on)")
+	return nil
+}
+
+// readKeyFile returns the local port and key written by the running core.
+func readKeyFile(dir string) (port int, key string) {
+	b, err := os.ReadFile(filepath.Join(dir, "local.key"))
+	if err != nil {
+		return 0, ""
+	}
+	p, k, ok := strings.Cut(strings.TrimSpace(string(b)), ":")
+	if !ok {
+		return 0, ""
+	}
+	fmt.Sscanf(p, "%d", &port)
+	return port, k
+}
+
+// windowURL is the address of the app's window; the key travels in the part after # so that it is
+// never sent over the network or written to a log.
+func windowURL(dir string) string {
+	port, key := readKeyFile(dir)
+	if port == 0 {
+		port = 8786
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d/#k=%s", port, key)
+}
+
+// portableMain runs everything in this one process: used before PC Power is installed, and on
+// systems other than Windows.
+func portableMain(background bool) {
+	if err := startCore(); err != nil {
+		// Almost always: PC Power is already running. Show its window instead of starting twice.
+		openWindow(windowURL(dataDir))
+		return
+	}
+	helperDir = dataDir
+	go helperLoop()
+	if autostartGet() {
+		autostartSet(true)
+	}
+	if !background {
+		openWindow(windowURL(dataDir))
 	}
 	runTray() // blocks until Quit
 }
+
+func main() { platformMain() }
 
 // ---- wake signal test ----
 //

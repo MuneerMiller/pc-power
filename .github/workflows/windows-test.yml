@@ -1,0 +1,32 @@
+name: Windows test
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: windows-app/go.mod
+          cache-dependency-path: windows-app/go.sum
+      - name: Build
+        working-directory: windows-app
+        run: |
+          go vet ./...
+          go build -trimpath -ldflags "-H windowsgui -s -w" -o PCPower.exe .
+      - name: Install as a service, test, uninstall
+        shell: pwsh
+        working-directory: windows-app
+        run: ../tools/windows-smoke-test.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PCPower-windows
+          path: windows-app/PCPower.exe

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -122,14 +123,18 @@ func runTray() {
 		open := systray.AddMenuItem("Open PC Power", "Schedules, power and phone pairing")
 		cancel := systray.AddMenuItem("Cancel pending shutdown", "Stops a shutdown or restart that is counting down")
 		systray.AddSeparator()
-		quit := systray.AddMenuItem("Quit", "Stop PC Power (schedules will not run)")
+		quitTip := "Stop PC Power (schedules will not run)"
+		if trayOnly {
+			quitTip = "Hide the tray icon. PC Power keeps running in the background."
+		}
+		quit := systray.AddMenuItem("Quit", quitTip)
 		go func() {
 			for {
 				select {
 				case <-open.ClickedCh:
-					openWindow(localURL())
+					openWindow(windowURL(helperDir))
 				case <-cancel.ClickedCh:
-					requestPower("cancel", true)
+					localCall("POST", "/api/power", map[string]string{"action": "cancel"})
 				case <-quit.ClickedCh:
 					systray.Quit()
 				}
@@ -249,6 +254,13 @@ powercfg /setactive SCHEME_CURRENT`
 
 // wolFix applies the settings as administrator. Windows shows its own "allow changes?" prompt first.
 func wolFix() error {
+	if serviceMode { // the service already has the rights; there is no desktop to show a prompt on
+		err := hidden("powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodePS(wolFixScript)).Start()
+		wolMu.Lock()
+		wolCache = nil
+		wolMu.Unlock()
+		return err
+	}
 	verb, _ := windows.UTF16PtrFromString("runas")
 	exe, _ := windows.UTF16PtrFromString("powershell.exe")
 	args, _ := windows.UTF16PtrFromString("-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand " + encodePS(wolFixScript))
@@ -350,4 +362,100 @@ func wakeTimerPolicy() string {
 		return "ImportantOnly"
 	}
 	return ""
+}
+
+// ---- what the user's session is doing (called by the tray helper) ----
+
+var (
+	user32               = syscall.NewLazyDLL("user32.dll")
+	shell32              = syscall.NewLazyDLL("shell32.dll")
+	procGetLastInputInfo = user32.NewProc("GetLastInputInfo")
+	procLockWorkStation  = user32.NewProc("LockWorkStation")
+	procPostMessage      = user32.NewProc("PostMessageW")
+	procKeybdEvent       = user32.NewProc("keybd_event")
+	procGetTickCount     = kernel32.NewProc("GetTickCount")
+	procQueryNotifyState = shell32.NewProc("SHQueryUserNotificationState")
+	trayOnly             bool // this process is only the tray helper; the service does the work
+	blockerRe            = regexp.MustCompile(`(?m)^\[(PROCESS|SERVICE)\]\s+(.+)$`)
+)
+
+func sessionIdleSeconds() int {
+	var info struct {
+		Size uint32
+		Time uint32
+	}
+	info.Size = uint32(unsafe.Sizeof(info))
+	if r, _, _ := procGetLastInputInfo.Call(uintptr(unsafe.Pointer(&info))); r == 0 {
+		return 0
+	}
+	now, _, _ := procGetTickCount.Call()
+	return int((uint32(now) - info.Time) / 1000)
+}
+
+// sessionFullscreen reports a full-screen app, game or presentation in the foreground.
+func sessionFullscreen() bool {
+	var state uint32
+	if hr, _, _ := procQueryNotifyState.Call(uintptr(unsafe.Pointer(&state))); hr != 0 {
+		return false
+	}
+	return state == 2 || state == 3 || state == 4 // busy (full screen), Direct3D full screen, presentation mode
+}
+
+func sessionRun(cmd string) {
+	switch cmd {
+	case "lock":
+		procLockWorkStation.Call()
+	case "displayoff":
+		// HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2 = off
+		procPostMessage.Call(0xffff, 0x0112, 0xf170, 2)
+	case "mute":
+		const vkVolumeMute, keyUp = 0xAD, 0x2
+		procKeybdEvent.Call(vkVolumeMute, 0, 0, 0)
+		procKeybdEvent.Call(vkVolumeMute, 0, keyUp, 0)
+	}
+}
+
+// powerRequests lists the programs that have asked Windows to stay awake: playing media, downloading,
+// backing up and so on. Windows only shows this to administrators, so it works once installed.
+func powerRequests() []string {
+	out, err := hidden("powercfg", "/requests").Output()
+	if err != nil {
+		return nil
+	}
+	seen, list := map[string]bool{}, []string{}
+	for _, m := range blockerRe.FindAllStringSubmatch(strings.ReplaceAll(string(out), "\r", ""), -1) {
+		name := strings.TrimSpace(m[2])
+		if i := strings.LastIndexAny(name, `\/`); i >= 0 {
+			name = name[i+1:]
+		}
+		if name == "" || strings.Contains(strings.ToLower(name), "pcpower") || seen[name] {
+			continue
+		}
+		seen[name] = true
+		list = append(list, name)
+		if len(list) == 3 {
+			break
+		}
+	}
+	return list
+}
+
+// netBytes returns the total bytes received and sent so far, from "netstat -e".
+func netBytes() (uint64, bool) {
+	out, err := hidden("netstat", "-e").Output()
+	if err != nil {
+		return 0, false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			continue
+		}
+		a, err1 := strconv.ParseUint(f[len(f)-2], 10, 64)
+		b, err2 := strconv.ParseUint(f[len(f)-1], 10, 64)
+		if err1 == nil && err2 == nil {
+			return a + b, true // the first numeric row is the byte counters
+		}
+	}
+	return 0, false
 }

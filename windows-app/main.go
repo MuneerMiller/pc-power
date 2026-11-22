@@ -34,6 +34,7 @@ type Schedule struct {
 	Date      string `json:"date"`
 	Enabled   bool   `json:"enabled"`
 	LastFired string `json:"lastFired"`
+	WhenBusy  string `json:"whenBusy"` // "wait" (default): hold off while the PC is in use. "force": do it anyway.
 }
 
 // Device is one paired phone. Only a hash of its access token is kept, so the file cannot be used to impersonate it.
@@ -53,6 +54,11 @@ type Config struct {
 	Accepted  string     `json:"acceptedTerms"` // version of the Terms and Privacy Policy the user agreed to
 	Devices   []Device   `json:"devices"`
 	Schedules []Schedule `json:"schedules"`
+	Idle      IdleRule   `json:"idle"`      // turn off after nobody has used the PC for a while
+	Timer     *TimerT    `json:"timer"`     // one-off "turn off in N minutes"
+	SkipDates []string   `json:"skipDates"` // days off: repeating schedules do not run
+	Events    []Event    `json:"events"`    // activity log, newest last
+	DryRun    bool       `json:"dryRun"`    // testing: log power actions instead of doing them
 }
 
 var (
@@ -77,15 +83,19 @@ func newCode() string {
 
 func newID() string { b := make([]byte, 8); rand.Read(b); return hex.EncodeToString(b) }
 
-func loadConfig() {
+func userDataDir() string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		dir = "."
 	}
+	return filepath.Join(dir, "PCPower")
+}
+
+func loadConfig() {
 	if p := os.Getenv("PCPOWER_CONFIG"); p != "" {
 		cfgPath = p
 	} else {
-		cfgPath = filepath.Join(dir, "PCPower", "config.json")
+		cfgPath = filepath.Join(dataDir, "config.json")
 	}
 	if b, err := os.ReadFile(cfgPath); err == nil {
 		json.Unmarshal(b, &cfg)
@@ -112,6 +122,19 @@ func loadConfig() {
 	if cfg.Schedules == nil {
 		cfg.Schedules = []Schedule{}
 	}
+	if cfg.SkipDates == nil {
+		cfg.SkipDates = []string{}
+	}
+	if cfg.Events == nil {
+		cfg.Events = []Event{}
+	}
+	if cfg.Idle.Minutes == 0 {
+		cfg.Idle = IdleRule{Minutes: 60, Action: "sleep"}
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(cfgPath), "dryrun")); err == nil {
+		cfg.DryRun = true // set by "--install --dry-run", for automated tests
+	}
+	dryRun = dryRun || cfg.DryRun
 	saveConfig()
 }
 
@@ -272,48 +295,56 @@ func requestPower(action string, manual bool) (string, error) {
 // Schedules run from this PC's own clock. One missed while the PC was off is skipped, never run late.
 func scheduler() {
 	for ; ; time.Sleep(10 * time.Second) {
-		now := time.Now()
-		date, hm := now.Format("2006-01-02"), now.Format("15:04")
-		key := date + " " + hm
-		var fire []string
-		mu.Lock()
-		for i := range cfg.Schedules {
-			s := &cfg.Schedules[i]
-			if !s.Enabled || s.Action == "wake" || s.Time != hm || s.LastFired == key {
-				continue // turn-on schedules are handled by wakeLoop, with a hardware wake timer
+		tick(time.Now())
+	}
+}
+
+func tick(now time.Time) {
+	date, hm := now.Format("2006-01-02"), now.Format("15:04")
+	key := date + " " + hm
+	best, force := "", false
+	mu.Lock()
+	dayOff := onSkipDate(date)
+	changed := false
+	for i := range cfg.Schedules {
+		s := &cfg.Schedules[i]
+		if !s.Enabled || s.Action == "wake" || s.Time != hm || s.LastFired == key {
+			continue // turn-on schedules are handled by wakeLoop, with a hardware wake timer
+		}
+		if len(s.Days) > 0 {
+			ok := false
+			for _, d := range s.Days {
+				ok = ok || d == int(now.Weekday())
 			}
-			if len(s.Days) > 0 {
-				ok := false
-				for _, d := range s.Days {
-					ok = ok || d == int(now.Weekday())
-				}
-				if !ok {
-					continue
-				}
-			} else if s.Date != date {
+			if !ok {
 				continue
 			}
-			s.LastFired = key
-			if len(s.Days) == 0 {
-				s.Enabled = false
-			}
-			fire = append(fire, s.Action)
+		} else if s.Date != date {
+			continue
 		}
-		if len(fire) > 0 {
-			saveConfig()
+		s.LastFired = key
+		changed = true
+		if len(s.Days) == 0 {
+			s.Enabled = false
+		} else if dayOff {
+			addEventLocked("schedule", "Scheduled "+strings.ToLower(labels[s.Action])+" skipped: today is marked as a day off.")
+			continue
 		}
-		mu.Unlock()
-		best := ""
-		for _, a := range fire {
-			if priority[a] > priority[best] {
-				best = a
-			}
-		}
-		if best != "" {
-			log.Printf("schedule fired: %s at %s (of %v)", best, key, fire)
-			requestPower(best, false)
+		// When several fall in the same minute, the strongest one wins.
+		if priority[s.Action] > priority[best] {
+			best, force = s.Action, s.WhenBusy == "force"
 		}
 	}
+	if changed {
+		saveConfig()
+	}
+	mu.Unlock()
+	if best != "" {
+		runScheduled(best, force)
+	}
+	checkTimer(now)
+	checkWaiting()
+	checkIdle()
 }
 
 func discovery() {

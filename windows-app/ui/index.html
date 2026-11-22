@@ -57,7 +57,14 @@
   <h1>PC <span>Power</span></h1>
   <div class="sub" id="sub">&nbsp;</div>
 
+  <div class="card" id="installCard" hidden style="border-color:var(--accent)">
+    <h2>Finish setting up</h2>
+    <p style="margin:0 0 10px">PC Power is running as a portable copy. Install it so that it runs before anyone signs in: schedules then always run, and a PC you turned on from your phone can be turned off again.</p>
+    <button class="primary" id="install">Install PC Power</button>
+    <div class="hint" style="margin-top:8px">Windows will ask for permission. Your schedules and paired phones are kept.</div>
+  </div>
   <div class="card" id="pending" hidden><div id="pendingText"></div><button class="primary" data-power="cancel">Cancel</button></div>
+  <div class="card" id="waitCard" hidden style="border-color:var(--accent)"><div id="waitText" style="margin-bottom:10px"></div><button data-power="cancel">Cancel it</button></div>
 
   <div class="card">
     <h2>This PC, right now</h2>
@@ -68,6 +75,18 @@
       <button data-power="hibernate">Hibernate</button>
         <button data-power="cancel">Cancel countdown</button>
     </div>
+    <div class="row" style="margin-top:8px">
+      <button data-power="lock">Lock</button>
+      <button data-power="displayoff">Screen off</button>
+      <button data-power="mute">Mute / unmute</button>
+    </div>
+    <form id="timerForm" style="grid-template-columns:auto 90px 1fr auto;align-items:end">
+      <label>Turn off in<select name="action"><option value="shutdown">Shut down</option><option value="sleep">Sleep</option><option value="hibernate">Hibernate</option></select></label>
+      <label>minutes<input name="minutes" type="number" min="1" max="1440" value="30" required style="font:inherit;color:var(--text);background:#10151c;border:1px solid var(--line);border-radius:8px;padding:8px 10px;min-width:0"></label>
+      <span></span>
+      <button>Start timer</button>
+    </form>
+    <div id="timerNow" hidden style="margin-top:10px"><span id="timerText"></span> <button class="link" id="timerCancel">Cancel timer</button></div>
     <div class="hint" id="wifiPower" hidden style="margin-top:10px;color:var(--text)">On Wi-Fi: use <b>Sleep</b> if you want to turn this PC on again from your phone.</div>
     <div class="hint" style="margin-top:10px">Shut down and Restart wait 60 seconds first, so you can cancel. Pressing a different button replaces the one counting down. Sleep and Hibernate happen straight away.</div>
   </div>
@@ -84,9 +103,33 @@
         <div class="days" id="days"></div>
       </div>
       <label>…or once on this date<input name="date" type="date"></label>
+      <label class="check" id="forceRow"><input type="checkbox" name="force"> Do it even if the PC is in use</label>
+      <div class="hint">Unless ticked, a scheduled turn-off waits while someone is using the PC, a full-screen app is open or a download is running, and happens once the PC is free.</div>
       <div class="hint" id="wakeNote" hidden style="color:var(--text)"><b>Turn on</b> works when this PC is asleep or hibernating: it wakes itself at that time, no phone needed. It cannot turn itself on after a full shut down, so turn it off with Sleep or Hibernate (by hand or on a schedule).</div>
       <button class="primary">Add schedule</button>
     </form>
+  </div>
+
+  <div class="card">
+    <h2>Automatic rules</h2>
+    <form id="idleForm" style="margin-top:0">
+      <label class="check"><input type="checkbox" name="enabled"> Turn off when nobody has used the PC for a while</label>
+      <div class="two">
+        <label>After (minutes)<input name="minutes" type="number" min="5" max="1440" style="font:inherit;color:var(--text);background:#10151c;border:1px solid var(--line);border-radius:8px;padding:8px 10px;min-width:0"></label>
+        <label>Do this<select name="action"><option value="sleep">Sleep</option><option value="hibernate">Hibernate</option><option value="shutdown">Shut down</option></select></label>
+      </div>
+      <div class="hint">It waits while a full-screen app is open, something is keeping the PC awake, or a download is running.</div>
+      <div class="row"><button class="primary">Save rule</button></div>
+    </form>
+    <h2 style="margin-top:18px">Days off</h2>
+    <div class="hint" style="margin-bottom:8px">On these dates, repeating schedules do not run (for example public holidays).</div>
+    <div id="skipList"></div>
+    <form id="skipForm" style="grid-template-columns:1fr auto"><input name="date" type="date" required><button>Add day off</button></form>
+  </div>
+
+  <div class="card">
+    <h2>Activity</h2>
+    <div id="events"></div>
   </div>
 
   <div class="card">
@@ -172,15 +215,23 @@ const LABEL = { shutdown:'Shut down', restart:'Restart', sleep:'Sleep', hibernat
 $('#days').innerHTML = DAYS.map((n, i) => `<label><input type="checkbox" name="day" value="${i}"><span>${n}</span></label>`).join('');
 
 function toast(msg, err) { const t = $('#toast'); t.textContent = msg; t.className = err ? 'err' : ''; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', err ? 6000 : 3500); }
+// The key that proves this window was opened by PC Power arrives after the # in the address.
+let KEY = '';
+try {
+  const m = location.hash.match(/k=([\w-]+)/);
+  if (m) { sessionStorage.setItem('pcp_key', m[1]); history.replaceState(null, '', location.pathname); }
+  KEY = sessionStorage.getItem('pcp_key') || '';
+} catch (e) {}
 async function api(method, url, body) {
-  const r = await fetch(url, { method, headers: { 'X-PCPower': '1', 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(url, { method, headers: { 'X-PCPower': '1', 'X-PCPower-Key': KEY, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 }
 const when = s => s.days.length ? (s.days.length === 7 ? 'every day' : [...s.days].sort().map(d => DAYS[d]).join(', ')) : 'once on ' + s.date;
 
-let nextTurnOn = '', turnOnError = '';
+let nextTurnOn = '', turnOnError = '', skipDates = [], idleLoaded = false;
+const SESSION = { lock: 1, displayoff: 1, mute: 1 };
 let last = '', lastDev = '', settingsLoaded = false, pend = null, pendAt = 0;
 function showPending() {
   const left = pend ? Math.ceil((pendAt - Date.now()) / 1000) : 0;
@@ -194,6 +245,15 @@ async function refresh() {
     $('#sub').textContent = st.name + (st.turnOn && st.turnOn.next ? ' · turns on ' + st.turnOn.next : '');
     nextTurnOn = (st.turnOn && st.turnOn.next) || ''; turnOnError = (st.turnOn && st.turnOn.error) || '';
     pend = st.pending; pendAt = pend ? Date.now() + pend.seconds * 1000 : 0; showPending();
+    $('#installCard').hidden = !loc.canInstall;
+    $('#waitCard').hidden = !st.waiting;
+    if (st.waiting) $('#waitText').textContent = `Scheduled ${LABEL[st.waiting.action].toLowerCase()} is waiting: ${st.waiting.reason.toLowerCase()}. It will happen once the PC is free.`;
+    $('#timerNow').hidden = !st.timer;
+    if (st.timer) $('#timerText').textContent = `${LABEL[st.timer.action]} at ${st.timer.at} (in ${Math.max(1, Math.round(st.timer.seconds / 60))} min).`;
+    skipDates = st.skipDates || [];
+    $('#skipList').innerHTML = skipDates.length ? skipDates.map(d => `<div class="sched"><div class="what">${esc(d)}</div><button class="link danger" data-skipdel="${esc(d)}">Remove</button></div>`).join('') : '<div class="hint">None.</div>';
+    $('#events').innerHTML = (st.events || []).slice(-12).reverse().map(e => `<div class="sched"><div class="what">${esc(e.text)} <span class="hint">· ${esc(e.t.slice(0, 16).replace('T', ' '))}</span></div></div>`).join('') || '<div class="hint">Nothing yet.</div>';
+    if (!idleLoaded) { idleLoaded = true; const f = $('#idleForm'); f.enabled.checked = st.idle.enabled; f.minutes.value = st.idle.minutes; f.action.value = st.idle.action; }
     const hb = document.querySelector('[data-power=hibernate]'); hb.disabled = !st.canHibernate; hb.title = st.canHibernate ? '' : 'Hibernate is turned off in Windows';
     $('#gate').hidden = loc.termsAccepted;
     $('#code').textContent = loc.code;
@@ -220,9 +280,10 @@ async function refresh() {
     if (!settingsLoaded) {
       settingsLoaded = true;
       const f = $('#settings');
-      f.name.value = st.name; f.autostart.checked = loc.autostart; f.autostart.disabled = !loc.autostartSupported;
+      f.name.value = st.name; f.autostart.checked = loc.autostart || loc.installed; f.autostart.disabled = !loc.autostartSupported || loc.installed;
+      if (loc.installed) f.autostart.parentElement.lastChild.textContent = ' Installed: PC Power starts with Windows, before sign-in';
     }
-  } catch (e) { toast('PC Power is not responding. Is it still running in the tray?', true); }
+  } catch (e) { toast(KEY ? 'PC Power is not responding. Is it still running?' : 'Open PC Power from its tray icon or the Start menu.', true); }
 }
 document.addEventListener('click', async e => {
   const b = e.target.closest('button'); if (!b) return;
@@ -232,11 +293,17 @@ document.addEventListener('click', async e => {
       const active = pend && pendAt > Date.now() ? pend.action : null;
       const q = active ? `${LABEL[active]} is counting down. Replace it with ${LABEL[a]}?` : `${LABEL[a]} this PC?`;
       const warn = a === 'shutdown' && nextTurnOn ? `\n\nThis PC is scheduled to turn on at ${nextTurnOn}. That will not happen after a full shut down. Use Sleep or Hibernate instead if you want it to.` : '';
-      if (a !== 'cancel' && a !== active && !confirm(q + warn)) return;
+      if (!SESSION[a] && a !== 'cancel' && a !== active && !confirm(q + warn)) return;
       const r = await api('POST', '/api/power', { action: a });
       toast(r.message); refresh();
     } else if (b.dataset.toggle) { await api('PATCH', '/api/schedules/' + b.dataset.toggle, { enabled: b.dataset.on === '1' }); refresh(); }
     else if (b.dataset.del) { await api('DELETE', '/api/schedules/' + b.dataset.del); refresh(); }
+    else if (b.dataset.skipdel) { await api('PUT', '/api/automation', { skipDates: skipDates.filter(d => d !== b.dataset.skipdel) }); refresh(); }
+    else if (b.id === 'timerCancel') { const r = await api('DELETE', '/api/timer'); toast(r.message); refresh(); }
+    else if (b.id === 'install') {
+      await api('POST', '/api/local/install');
+      document.body.innerHTML = '<main><h1>Installing PC Power</h1><p>Approve the Windows prompt. PC Power will open again when it is done; you can close this window.</p></main>';
+    }
     else if (b.dataset.unpair) {
       if (!confirm(`Remove "${b.dataset.name}"? It will no longer be able to control this PC.`)) return;
       await api('DELETE', '/api/local/devices/' + b.dataset.unpair); refresh(); toast('Phone removed.');
@@ -250,7 +317,7 @@ document.addEventListener('click', async e => {
 $('#add').addEventListener('submit', async e => {
   e.preventDefault(); const fd = new FormData(e.target);
   try {
-    await api('POST', '/api/schedules', { action: fd.get('action'), time: fd.get('time'), days: fd.getAll('day').map(Number), date: fd.get('date') });
+    await api('POST', '/api/schedules', { action: fd.get('action'), time: fd.get('time'), days: fd.getAll('day').map(Number), date: fd.get('date'), whenBusy: fd.get('force') ? 'force' : 'wait' });
     e.target.reset(); toast('Schedule added.'); refresh();
   } catch (err) { toast(err.message, true); }
 });
@@ -301,6 +368,21 @@ $('#agree').addEventListener('click', async () => {
   catch (err) { toast(err.message, true); }
 });
 $('#disagree').addEventListener('click', async () => { try { await api('POST', '/api/local/quit'); } catch (e) {} document.body.innerHTML = '<main><p>PC Power has been closed. You can close this window.</p></main>'; });
+$('#timerForm').addEventListener('submit', async e => {
+  e.preventDefault(); const fd = new FormData(e.target);
+  try { const r = await api('POST', '/api/timer', { action: fd.get('action'), minutes: Number(fd.get('minutes')) }); toast(r.message); refresh(); }
+  catch (err) { toast(err.message, true); }
+});
+$('#idleForm').addEventListener('submit', async e => {
+  e.preventDefault(); const f = e.target;
+  try { await api('PUT', '/api/automation', { idle: { enabled: f.enabled.checked, minutes: Number(f.minutes.value), action: f.action.value } }); toast('Rule saved.'); }
+  catch (err) { toast(err.message, true); }
+});
+$('#skipForm').addEventListener('submit', async e => {
+  e.preventDefault(); const d = new FormData(e.target).get('date');
+  try { await api('PUT', '/api/automation', { skipDates: [...skipDates, d] }); e.target.reset(); refresh(); }
+  catch (err) { toast(err.message, true); }
+});
 refresh(); setInterval(refresh, 4000);
 </script>
 </body>
