@@ -99,4 +99,6 @@ Check 'settings removed' (-not (Test-Path $data))
 Check 'program folder removed' (-not (Test-Path "$env:ProgramFiles\PC Power"))
 Check 'firewall rule removed' ((netsh advfirewall firewall show rule name="PC Power" | Out-String) -notmatch 'Rule Name')
 
-if ($script:failed) { "`nSOME CHECKS FAILED"; exit 1 } else { "`nALL CHECKS PASSED" }
+if ($script:failed) { "`nSOME CHECKS FAILED"; exit 1 }
+"`nALL CHECKS PASSED"
+exit 0
