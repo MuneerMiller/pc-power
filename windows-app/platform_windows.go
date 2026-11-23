@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -458,4 +459,71 @@ func netBytes() (uint64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// ---- network type and firewall (why a phone cannot find this PC) ----
+
+func powershell(script string) *exec.Cmd {
+	return hidden(filepath.Join(os.Getenv("SystemRoot"), `System32\WindowsPowerShell\v1.0\powershell.exe`),
+		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+}
+
+// networkCategory reports whether Windows treats the network on card ifIndex as public or private.
+func networkCategory(ifIndex int) (category, name string) {
+	out, err := powershell(fmt.Sprintf(`$p = Get-NetConnectionProfile -InterfaceIndex %d -ErrorAction Stop | Select-Object -First 1; [string]$p.NetworkCategory + '|' + $p.Name`, ifIndex)).Output()
+	if err != nil {
+		return "", ""
+	}
+	cat, nm, _ := strings.Cut(strings.TrimSpace(string(out)), "|")
+	switch strings.ToLower(cat) {
+	case "public":
+		return "public", nm
+	case "private":
+		return "private", nm
+	case "domainauthenticated":
+		return "domain", nm
+	}
+	return "", nm
+}
+
+// firewallState checks the installed copy's firewall rule. A portable copy relies on the rule Windows
+// made when it first asked, which cannot be checked reliably, so it says "unknown".
+func firewallState() string {
+	if !serviceMode {
+		return "unknown"
+	}
+	if hidden("netsh", "advfirewall", "firewall", "show", "rule", "name="+firewallRule).Run() != nil {
+		return "missing"
+	}
+	return "ok"
+}
+
+func fixFirewall() error {
+	if !serviceMode {
+		return errors.New("only the installed PC Power can repair its firewall rule")
+	}
+	exe, _ := os.Executable()
+	hidden("netsh", "advfirewall", "firewall", "delete", "rule", "name="+firewallRule).Run()
+	out, err := hidden("netsh", "advfirewall", "firewall", "add", "rule", "name="+firewallRule, "dir=in", "action=allow",
+		"program="+exe, "profile=private,domain", "enable=yes").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("could not add the firewall rule: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// makeNetworkPrivate tells Windows this is a trusted (home) network. The installed copy runs as a
+// service and can do it directly; a portable copy asks Windows for permission first.
+func makeNetworkPrivate(ifIndex int) error {
+	script := fmt.Sprintf("Set-NetConnectionProfile -InterfaceIndex %d -NetworkCategory Private", ifIndex)
+	if serviceMode {
+		if out, err := powershell(script).CombinedOutput(); err != nil {
+			return fmt.Errorf("Windows did not change it: %s", strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	verb, _ := windows.UTF16PtrFromString("runas")
+	file, _ := windows.UTF16PtrFromString(filepath.Join(os.Getenv("SystemRoot"), `System32\WindowsPowerShell\v1.0\powershell.exe`))
+	args, _ := windows.UTF16PtrFromString("-NoProfile -WindowStyle Hidden -Command " + script)
+	return windows.ShellExecute(0, verb, file, args, nil, windows.SW_HIDE)
 }

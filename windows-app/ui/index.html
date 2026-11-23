@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PC Power</title>
-<link rel="icon" href="data:,">
+<link rel="icon" type="image/png" sizes="32x32" href="/icon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <style>
   :root { --bg:#10141a; --card:#1a2029; --line:#2a323e; --text:#e8ecf1; --dim:#8b96a5; --accent:#4cc38a; --danger:#e5604d; }
   * { box-sizing:border-box; }
@@ -57,6 +59,12 @@
   <h1>PC <span>Power</span></h1>
   <div class="sub" id="sub">&nbsp;</div>
 
+  <div class="card" id="netCard" hidden style="border-color:#e5484d">
+    <h2 id="netTitle">Your phone cannot find this PC</h2>
+    <p id="netText" style="margin:0 0 10px"></p>
+    <button class="primary" id="netFix"></button>
+    <div class="hint" id="netHint" style="margin-top:8px"></div>
+  </div>
   <div class="card" id="installCard" hidden style="border-color:var(--accent)">
     <h2>Finish setting up</h2>
     <p style="margin:0 0 10px">PC Power is running as a portable copy. Install it so that it runs before anyone signs in: schedules then always run, and a PC you turned on from your phone can be turned off again.</p>
@@ -245,6 +253,21 @@ async function refresh() {
     $('#sub').textContent = st.name + (st.turnOn && st.turnOn.next ? ' · turns on ' + st.turnOn.next : '');
     nextTurnOn = (st.turnOn && st.turnOn.next) || ''; turnOnError = (st.turnOn && st.turnOn.error) || '';
     pend = st.pending; pendAt = pend ? Date.now() + pend.seconds * 1000 : 0; showPending();
+    const net = loc.network || {};
+    $('#netCard').hidden = !net.problem;
+    if (net.problem === 'public') {
+      $('#netTitle').textContent = 'Your phone cannot find this PC';
+      $('#netText').textContent = `Windows treats "${net.name || 'this network'}" as a public network, so it hides this PC from other devices, including your phone.`;
+      $('#netFix').textContent = 'This is my home network: make it private';
+      $('#netFix').dataset.fix = 'private';
+      $('#netHint').textContent = 'Only do this on a network you trust, like your home. On a café or hotel network, leave it public. You can also change it yourself: Windows Settings > Network & internet > Ethernet (or Wi-Fi) > Private network.';
+    } else if (net.problem === 'firewall') {
+      $('#netTitle').textContent = 'The firewall is blocking your phone';
+      $('#netText').textContent = 'The Windows Firewall rule that lets phones on your home network reach PC Power is missing.';
+      $('#netFix').textContent = 'Repair the firewall rule';
+      $('#netFix').dataset.fix = 'firewall';
+      $('#netHint').textContent = 'The rule only allows private (home) networks, never public ones.';
+    }
     $('#installCard').hidden = !loc.canInstall;
     $('#waitCard').hidden = !st.waiting;
     if (st.waiting) $('#waitText').textContent = `Scheduled ${LABEL[st.waiting.action].toLowerCase()} is waiting: ${st.waiting.reason.toLowerCase()}. It will happen once the PC is free.`;
@@ -300,6 +323,14 @@ document.addEventListener('click', async e => {
     else if (b.dataset.del) { await api('DELETE', '/api/schedules/' + b.dataset.del); refresh(); }
     else if (b.dataset.skipdel) { await api('PUT', '/api/automation', { skipDates: skipDates.filter(d => d !== b.dataset.skipdel) }); refresh(); }
     else if (b.id === 'timerCancel') { const r = await api('DELETE', '/api/timer'); toast(r.message); refresh(); }
+    else if (b.id === 'netFix') {
+      b.disabled = true;
+      try { const r = await api('POST', '/api/local/network-fix', { fix: b.dataset.fix }); toast(r.message); }
+      catch (err) { toast(err.message, true); }
+      b.disabled = false;
+      await api('GET', '/api/local?fresh=1').catch(() => {});
+      setTimeout(refresh, 1500);
+    }
     else if (b.id === 'install') {
       await api('POST', '/api/local/install');
       document.body.innerHTML = '<main><h1>Installing PC Power</h1><p>Approve the Windows prompt. PC Power will open again when it is done; you can close this window.</p></main>';

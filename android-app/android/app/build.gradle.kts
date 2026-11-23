@@ -1,7 +1,17 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+// Release signing: android/key.properties points at your upload key (see docs/RELEASE.md).
+// Never commit key.properties or the .jks file. Without them, release builds use the debug key.
+val keyProps = Properties().apply {
+    val f = rootProject.file("key.properties")
+    if (f.exists()) load(FileInputStream(f))
 }
 
 android {
@@ -15,8 +25,8 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "za.co.pcpower.pc_power"
+        // The app's permanent identity on Google Play. It can never change once published.
+        applicationId = "io.github.muneermiller.pcpower"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
@@ -29,11 +39,20 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (keyProps.getProperty("storeFile") != null) {
+            create("upload") {
+                storeFile = file(keyProps.getProperty("storeFile"))
+                storePassword = keyProps.getProperty("storePassword")
+                keyAlias = keyProps.getProperty("keyAlias")
+                keyPassword = keyProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (keyProps.getProperty("storeFile") != null) signingConfigs.getByName("upload") else signingConfigs.getByName("debug")
         }
     }
 }

@@ -103,3 +103,20 @@ func powerRequests() []string {
 }
 
 func netBytes() (uint64, bool) { return 0, false }
+
+// ---- network type and firewall: test hooks ----
+
+func networkCategory(int) (string, string) {
+	if c := os.Getenv("PCPOWER_FAKE_NETWORK"); c != "" {
+		return c, "Test network"
+	}
+	return "private", "Test network"
+}
+
+func firewallState() string { return "unknown" }
+func fixFirewall() error    { return nil }
+
+func makeNetworkPrivate(int) error {
+	os.Setenv("PCPOWER_FAKE_NETWORK", "private")
+	return nil
+}

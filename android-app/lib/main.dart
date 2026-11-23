@@ -664,8 +664,8 @@ class _AddPcPageState extends State<AddPcPage> {
             )
           else if (found!.isEmpty)
             const Padding(
-              padding: EdgeInsets.all(24),
-              child: Text('No PCs found.\n\nCheck that PC Power is running on the PC, that Windows Firewall allowed it, and that your phone is on the same Wi-Fi.', textAlign: TextAlign.center),
+              padding: EdgeInsets.fromLTRB(20, 16, 20, 0),
+              child: CantFindHelp(title: 'No PCs found'),
             )
           else
             for (final f in found!)
@@ -1268,8 +1268,8 @@ class _PcPageState extends State<PcPage> {
                     ),
                   ],
                   if (online == false && !waking) ...[
-                    const SizedBox(height: 8),
-                    Text('If the PC is on but your phone is on another network, it also shows as off here.', style: Theme.of(context).textTheme.bodySmall),
+                    const SizedBox(height: 4),
+                    const ExpansionTile(tilePadding: EdgeInsets.zero, childrenPadding: EdgeInsets.only(bottom: 8), title: Text('The PC is on, but shows as off?'), children: [CantFindHelp()]),
                   ],
                   if (on)
                     Wrap(
@@ -1490,6 +1490,59 @@ class _PcPageState extends State<PcPage> {
   }
 }
 
+/// What to check when the phone cannot find or reach a PC that is on.
+class CantFindHelp extends StatelessWidget {
+  const CantFindHelp({super.key, this.title});
+  final String? title;
+
+  @override
+  Widget build(BuildContext context) {
+    const tips = [
+      ('Same network', 'Your phone must be on the same home network as the PC, not mobile data or a guest Wi-Fi.'),
+      ('PC Power is running', 'Open PC Power on the PC. If it shows a red box, follow it: it explains what is blocking your phone and can fix it.'),
+      (
+        'Network set to Private',
+        'Windows hides the PC from other devices on a "Public" network. On the PC: Settings > Network & internet > Ethernet (or Wi-Fi) > Private network. Only do this on your home network.',
+      ),
+      ('Firewall', 'If Windows asked whether to allow PC Power, it needs to be allowed on private networks.'),
+      (
+        'Router',
+        'Some routers keep Wi-Fi devices apart ("client isolation" or "AP isolation"). If so, turn it off for your home Wi-Fi, or use "Enter the address myself" with the address shown in the PC Power window.',
+      ),
+    ];
+    final small = Theme.of(context).textTheme.bodySmall;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (title != null) ...[Text(title!, style: Theme.of(context).textTheme.titleMedium), const SizedBox(height: 8)],
+        for (final t in tips)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.only(top: 3),
+                  child: Icon(Icons.check_circle_outline, size: 16, color: accent),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(t.$1, style: const TextStyle(fontWeight: FontWeight.w600)),
+                      Text(t.$2, style: small),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 // ---------------------------------------------------------------- help
 
 class HelpPage extends StatelessWidget {
@@ -1513,6 +1566,7 @@ class HelpPage extends StatelessWidget {
         'Type the 12-character pairing code shown in the PC Power window under "Connect your phone".',
         'The connection is encrypted and the code is never sent over the network. Each phone gets its own access, which you can remove in the PC Power window under "Paired phones".',
         'PC not in the list? Tap "Enter the address myself" and type the address shown in the PC Power window.',
+        'Still not found? Windows may treat your home network as Public, which hides the PC. The PC Power window on the PC shows a red box with a fix button when that happens.',
       ],
     ),
     (

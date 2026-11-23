@@ -5,7 +5,11 @@ $script:failed = $false
 function Check($name, $cond) { if ($cond) { "PASS  $name" } else { "FAIL  $name"; $script:failed = $true } }
 function Info($name, $value) { "INFO  ${name}: $value" }
 
-$p = Start-Process .\PCPower.exe -ArgumentList '--install', '--quiet', '--dry-run', '--for-user', "$env:USERDOMAIN\$env:USERNAME" -Wait -PassThru
+# A portable copy's settings, to check that installing carries them over.
+$portable = Join-Path $env:TEMP 'pcpower-portable'
+New-Item -ItemType Directory -Force $portable | Out-Null
+'{"name":"Carry test","schedules":[{"id":"carry1","action":"shutdown","time":"23:10","days":[1],"enabled":true}]}' | Set-Content -Encoding ascii "$portable\config.json"
+$p = Start-Process .\PCPower.exe -ArgumentList '--install', '--quiet', '--dry-run', '--for-user', "$env:USERDOMAIN\$env:USERNAME", '--from-dir', $portable -Wait -PassThru
 Check 'installer finished without error' ($p.ExitCode -eq 0)
 Start-Sleep 6
 $data = "$env:ProgramData\PCPower"
@@ -31,6 +35,27 @@ function Api($method, $path, $body) {
 }
 $st = Api Get '/api/status'
 Check 'status answers' ($st.app -eq 'pcpower')
+Check 'portable settings carried over on install' (($st.schedules | Where-Object id -eq 'carry1') -and $st.name -eq 'Carry test')
+$ver = (Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PCPower').DisplayVersion
+Info 'installed version' $ver
+
+# Can phones reach this PC? Network type and firewall checks, and their one-click fixes.
+$loc = Api Get '/api/local?fresh=1'
+Info 'network check' ($loc.network | ConvertTo-Json -Compress)
+Check 'network type detected' ($loc.network.category -in @('public', 'private', 'domain'))
+Check 'firewall rule seen' ($loc.network.firewall -eq 'ok')
+netsh advfirewall firewall delete rule name="PC Power" | Out-Null
+$loc = Api Get '/api/local?fresh=1'
+Check 'missing firewall rule detected' ($loc.network.firewall -eq 'missing' -and $loc.network.problem -in @('firewall', 'public'))
+Api Post '/api/local/network-fix' @{ fix = 'firewall' } | Out-Null
+Check 'firewall rule repaired' ((netsh advfirewall firewall show rule name="PC Power" | Out-String) -match 'PC Power')
+if ($loc.network.category -eq 'public') {
+  Api Post '/api/local/network-fix' @{ fix = 'private' } | Out-Null
+  $loc = Api Get '/api/local?fresh=1'
+  Check 'public network switched to private' ($loc.network.category -eq 'private' -and -not $loc.network.problem)
+}
+$icon = Invoke-WebRequest "$base/icon-192.png" -UseBasicParsing
+Check 'window icon served' ($icon.StatusCode -eq 200 -and $icon.Headers['Content-Type'] -eq 'image/png')
 Check 'network card found' ($st.mac -match '^([0-9a-f]{2}:){5}[0-9a-f]{2}$')
 Info 'connection' $st.connection
 Info 'can hibernate' $st.canHibernate
@@ -89,6 +114,16 @@ Restart-Service PCPower
 Start-Sleep 5
 $st = Api Get '/api/status'
 Check 'settings survive a service restart' ($st.idle.enabled -and $st.schedules.Count -ge 1)
+
+# Updating: installing again over the top (what "Update PC Power" does) keeps everything.
+$p = Start-Process .\PCPower.exe -ArgumentList '--install', '--quiet', '--dry-run', '--for-user', "$env:USERDOMAIN\$env:USERNAME" -Wait -PassThru
+Check 'update installs without error' ($p.ExitCode -eq 0)
+Start-Sleep 6
+$port, $key = (Get-Content "$data\local.key").Split(':')
+$h = @{ 'X-PCPower' = '1'; 'X-PCPower-Key' = $key }
+$st = Api Get '/api/status'
+Check 'update keeps schedules and rules' ($st.idle.enabled -and ($st.schedules | Where-Object id -eq 'carry1'))
+Check 'service running after update' ((Get-Service PCPower).Status -eq 'Running')
 
 # Uninstall
 $p = Start-Process "$env:ProgramFiles\PC Power\PCPower.exe" -ArgumentList '--uninstall', '--quiet' -Wait -PassThru

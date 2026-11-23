@@ -34,7 +34,7 @@ import (
 const (
 	installSupported = true
 	serviceName      = "PCPower"
-	appVersion       = "2.5.0"
+	appVersion       = "2.6.0"
 	uninstallKey     = `Software\Microsoft\Windows\CurrentVersion\Uninstall\PCPower`
 	machineRunKey    = `Software\Microsoft\Windows\CurrentVersion\Run`
 	firewallRule     = "PC Power"
@@ -89,11 +89,79 @@ func platformMain() {
 	case isSvc || *service:
 		runService()
 	case serviceInstalled():
+		if !*background && offerUpdate() {
+			return
+		}
 		helperMain(*background)
 	default:
 		dataDir = userDataDir()
 		portableMain(*background)
 	}
+}
+
+// installedVersion is the version in "Installed apps", or "" if unknown.
+func installedVersion() string {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, uninstallKey, registry.QUERY_VALUE)
+	if err != nil {
+		return ""
+	}
+	defer k.Close()
+	v, _, _ := k.GetStringValue("DisplayVersion")
+	return v
+}
+
+// newerVersion reports whether version a is newer than b ("2.10.0" > "2.9.3").
+func newerVersion(a, b string) bool {
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(pa) || i < len(pb); i++ {
+		var x, y int
+		if i < len(pa) {
+			fmt.Sscan(pa[i], &x)
+		}
+		if i < len(pb) {
+			fmt.Sscan(pb[i], &y)
+		}
+		if x != y {
+			return x > y
+		}
+	}
+	return false
+}
+
+// offerUpdate runs when someone starts a PC Power that is not the installed copy. If it is newer, it
+// offers to replace the installed one (settings, schedules and paired phones are kept).
+func offerUpdate() bool {
+	self, err := os.Executable()
+	if err != nil || strings.EqualFold(filepath.Dir(filepath.Clean(self)), filepath.Clean(programDir())) {
+		return false
+	}
+	have := installedVersion()
+	if have != "" && !newerVersion(appVersion, have) {
+		return false // the same or an older copy: just open the installed PC Power
+	}
+	from := have
+	if from == "" {
+		from = "the installed version"
+	}
+	if !askYesNo(fmt.Sprintf("Update PC Power from %s to %s?\n\nYour schedules, rules and paired phones are kept. Windows will ask for permission.", from, appVersion)) {
+		return false
+	}
+	user := os.Getenv("USERDOMAIN") + `\` + os.Getenv("USERNAME")
+	verb, _ := windows.UTF16PtrFromString("runas")
+	file, _ := windows.UTF16PtrFromString(self)
+	a, _ := windows.UTF16PtrFromString(fmt.Sprintf(`--install --for-user "%s"`, user))
+	if err := windows.ShellExecute(0, verb, file, a, nil, windows.SW_SHOWNORMAL); err != nil {
+		messageBox("The update did not start: "+err.Error(), true)
+	}
+	return true
+}
+
+func askYesNo(text string) bool {
+	t, _ := windows.UTF16PtrFromString(text)
+	c, _ := windows.UTF16PtrFromString("PC Power")
+	const mbYesNo, mbQuestion, idYes = 0x4, 0x20, 6
+	r, _ := windows.MessageBox(0, t, c, mbYesNo|mbQuestion)
+	return r == idYes
 }
 
 func report(okText string, err error, quiet bool) {
@@ -271,7 +339,13 @@ func doInstall(forUser, fromDir string, dry bool) error {
 	}
 
 	// 2. Settings: carry over a portable copy's schedules, paired phones and certificate once.
-	if _, err := os.Stat(filepath.Join(data, "config.json")); err != nil && fromDir != "" {
+	src, srcErr := os.Stat(filepath.Join(fromDir, "config.json"))
+	have, haveErr := os.Stat(filepath.Join(data, "config.json"))
+	if fromDir != "" && srcErr == nil && (haveErr != nil || src.ModTime().After(have.ModTime())) {
+		if haveErr == nil {
+			copyFile(filepath.Join(data, "config.json"), filepath.Join(data, "config.before-install.json"))
+		}
+		log.Printf("carrying over settings from %s", fromDir)
 		for _, f := range []string{"config.json", "cert.pem", "key.pem"} {
 			if err := copyFile(filepath.Join(fromDir, f), filepath.Join(data, f)); err != nil {
 				log.Printf("not carried over: %s (%v)", f, err)

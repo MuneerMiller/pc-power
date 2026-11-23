@@ -525,9 +525,17 @@ func localRoutes() http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 		w.Write(bytes.Replace(indexHTML, []byte("<!--LEGAL-->"), legalHTML, 1))
 	})
+	for _, s := range []string{"32", "192", "512"} {
+		png := iconPNG[s]
+		m.HandleFunc("GET /icon-"+s+".png", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Cache-Control", "max-age=86400")
+			w.Write(png)
+		})
+	}
 	common(m, local)
 	m.HandleFunc("POST /api/local/presence", local(hPresence))
 	// Portable copy only: install PC Power properly, as a Windows service. Windows asks for approval.
@@ -558,7 +566,34 @@ func localRoutes() http.Handler {
 			"fingerprint": hex.EncodeToString(certFP[:8])}
 		mu.Unlock()
 		out["autostart"], out["autostartSupported"] = autostartGet(), autostartSupported
+		out["network"] = netCheck(r.URL.Query().Get("fresh") == "1")
 		reply(w, 200, out)
+	}))
+	// One-click fixes for "my phone cannot find this PC". Only ever started by a click in this window.
+	m.HandleFunc("POST /api/local/network-fix", local(func(w http.ResponseWriter, r *http.Request) {
+		var b struct{ Fix string }
+		json.NewDecoder(r.Body).Decode(&b)
+		var err error
+		switch b.Fix {
+		case "private":
+			idx := activeIfIndex()
+			if idx == 0 {
+				fail(w, 400, "Could not tell which network this PC is on.")
+				return
+			}
+			err = makeNetworkPrivate(idx)
+		case "firewall":
+			err = fixFirewall()
+		default:
+			fail(w, 400, "Unknown fix.")
+			return
+		}
+		if err != nil {
+			fail(w, 500, err.Error())
+			return
+		}
+		addEvent("Network settings fixed from the PC Power window ("+b.Fix+")", "")
+		reply(w, 200, map[string]any{"ok": true, "message": "Done. Search for the PC again on your phone."})
 	}))
 	m.HandleFunc("PATCH /api/local", local(func(w http.ResponseWriter, r *http.Request) {
 		var b struct {
