@@ -3,7 +3,7 @@
 Writes: docs/legal/*.md and *.html (to host), android-app/lib/legal.dart, windows-app/ui/legal.html"""
 import html, json, os
 
-VERSION = "2026-11-22.3"          # change this whenever the texts change: both apps ask users to agree again
+VERSION = "2026-11-23.1"          # change this whenever the texts change: both apps ask users to agree again
 EFFECTIVE = "22 November 2026"
 PUBLISHER = "Mogamat Muneer Miller"
 PLACE = "Cape Town, South Africa"
@@ -97,6 +97,8 @@ PRIVACY = ("Privacy Policy", [
   "On your phone: the names of the computers you paired; their network addresses (IP address, hardware \"MAC\" address and, if you enter one, your public address or DDNS name); a fingerprint of each computer's security certificate; and an access key for each computer, kept in your phone's encrypted storage. These are excluded from Android backups. So that the home-screen widget and quick settings tile can turn a computer on, the app keeps a copy of that one computer's name and addresses where the widget can read it; the access key is never included.",
   "On your computer: the computer's name; the pairing code; your schedules; the name and pairing date of each paired phone, with a scrambled (hashed) copy of its access key; the security certificate the app created; and a log file listing recent actions and the network addresses they came from. The log is replaced each time the app starts.",
   "The computer also keeps a short activity list (the last 100 entries, such as \"Shut down, from Sam's phone\" or \"Scheduled sleep postponed\"), your timer, your automatic rules and your days off. Paired phones can read the activity list.",
+  "Groups of computers and your app lock setting are kept on your phone only. If you turn on the app lock, Android checks your fingerprint, face or screen lock and only tells PC Power whether it matched; PC Power never receives or stores biometric data.",
+  "Problem reports: if you choose to make one, the app shows you a report about how PC Power is set up (versions, the computer's local network address and type, wake settings, recent activity and log lines). It contains no access keys, pairing codes or public addresses. It is only sent if you send it yourself, by email from your own email app, to the developer, who uses it only to help you and deletes it when your question is resolved.",
   "To avoid turning the computer off while it is being used, the Windows app checks how long ago the keyboard or mouse was last used, whether a full-screen app is open, which programs have asked Windows to stay awake, and how busy the network connection is. It does not look at what you type, what is on your screen or what is being transferred. These checks are used in the moment and are not recorded, except that the reason a schedule was postponed (which can include the name of a program) appears in the activity list.",
  ]),
  ("4. How the apps communicate", [

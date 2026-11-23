@@ -24,6 +24,10 @@ On your computer: the computer's name; the pairing code; your schedules; the nam
 
 The computer also keeps a short activity list (the last 100 entries, such as "Shut down, from Sam's phone" or "Scheduled sleep postponed"), your timer, your automatic rules and your days off. Paired phones can read the activity list.
 
+Groups of computers and your app lock setting are kept on your phone only. If you turn on the app lock, Android checks your fingerprint, face or screen lock and only tells PC Power whether it matched; PC Power never receives or stores biometric data.
+
+Problem reports: if you choose to make one, the app shows you a report about how PC Power is set up (versions, the computer's local network address and type, wake settings, recent activity and log lines). It contains no access keys, pairing codes or public addresses. It is only sent if you send it yourself, by email from your own email app, to the developer, who uses it only to help you and deletes it when your question is resolved.
+
 To avoid turning the computer off while it is being used, the Windows app checks how long ago the keyboard or mouse was last used, whether a full-screen app is open, which programs have asked Windows to stay awake, and how busy the network connection is. It does not look at what you type, what is on your screen or what is being transferred. These checks are used in the moment and are not recorded, except that the reason a schedule was postponed (which can include the name of a program) appears in the activity list.
 
 ## 4. How the apps communicate

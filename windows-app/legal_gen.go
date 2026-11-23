@@ -3,4 +3,4 @@
 package main
 
 // legalVersion changes whenever the Terms of Use or Privacy Policy change; users are then asked to agree again.
-const legalVersion = "2026-11-22.3"
+const legalVersion = "2026-11-23.1"

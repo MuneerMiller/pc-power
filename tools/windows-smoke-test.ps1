@@ -106,6 +106,21 @@ Check 'idle rule and days off saved' ($st.idle.enabled -and $st.skipDates -conta
 $r = Api Post '/api/wake-peer' @{ mac = '3c:7c:3f:2a:9b:10'; name = 'Test PC' }
 Check 'wake signal for another PC sent' ($r.ok)
 
+# 2.7: pause all schedules, restart to BIOS (dry run), problem report without secrets
+Api Put '/api/automation' @{ paused = $true } | Out-Null
+$st = Api Get '/api/status'
+Check 'schedules paused' ($st.paused -eq $true)
+Info 'turn-on while paused' ($st.turnOn | ConvertTo-Json -Compress)
+Api Put '/api/automation' @{ paused = $false } | Out-Null
+$r = Api Post '/api/power' @{ action = 'bios' }
+Info 'restart to BIOS' $r.message
+Api Post '/api/power' @{ action = 'cancel' } | Out-Null
+$rep = (Api Get '/api/report').report
+Info 'problem report (first lines)' (($rep -split "`n" | Select-Object -First 6) -join ' | ')
+$cfg = Get-Content "$data\config.json" -Raw | ConvertFrom-Json
+Check 'problem report made' ($rep -match 'PC Power problem report' -and $rep -match 'Windows')
+Check 'problem report holds no keys' (-not $rep.Contains($key) -and -not ($cfg.token -and $rep.Contains($cfg.token)))
+
 "--- service log"
 Get-Content "$data\pcpower.log" -Tail 25 | ForEach-Object { "      $_" }
 

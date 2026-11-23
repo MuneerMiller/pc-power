@@ -34,7 +34,6 @@ import (
 const (
 	installSupported = true
 	serviceName      = "PCPower"
-	appVersion       = "2.6.0"
 	uninstallKey     = `Software\Microsoft\Windows\CurrentVersion\Uninstall\PCPower`
 	machineRunKey    = `Software\Microsoft\Windows\CurrentVersion\Run`
 	firewallRule     = "PC Power"

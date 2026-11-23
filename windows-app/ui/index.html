@@ -21,6 +21,7 @@
   button:hover { border-color:#4a5667; }
   button.primary { background:var(--accent); border-color:var(--accent); color:#06150d; font-weight:600; }
   button.link { background:none; border:none; padding:2px 6px; color:var(--dim); }
+  a.link { color:var(--accent); align-self:center; }
   button.danger { color:var(--danger); }
   .sched { display:flex; align-items:center; gap:8px; padding:8px 0; border-top:1px solid var(--line); }
   .sched:first-child { border-top:none; padding-top:0; }
@@ -87,6 +88,8 @@
       <button data-power="lock">Lock</button>
       <button data-power="displayoff">Screen off</button>
       <button data-power="mute">Mute / unmute</button>
+      <button data-power="signout">Sign out</button>
+      <button data-power="bios">Restart to BIOS</button>
     </div>
     <form id="timerForm" style="grid-template-columns:auto 90px 1fr auto;align-items:end">
       <label>Turn off in<select name="action"><option value="shutdown">Shut down</option><option value="sleep">Sleep</option><option value="hibernate">Hibernate</option></select></label>
@@ -120,6 +123,7 @@
 
   <div class="card">
     <h2>Automatic rules</h2>
+    <label class="check" style="margin-bottom:14px"><input type="checkbox" id="paused"> Pause all schedules (turn-off and turn-on) until I switch this off</label>
     <form id="idleForm" style="margin-top:0">
       <label class="check"><input type="checkbox" name="enabled"> Turn off when nobody has used the PC for a while</label>
       <div class="two">
@@ -138,6 +142,17 @@
   <div class="card">
     <h2>Activity</h2>
     <div id="events"></div>
+  </div>
+
+  <div class="card">
+    <h2>Something not working?</h2>
+    <p style="margin:0 0 10px">Make a problem report: what PC Power sees on this PC (versions, network, wake settings, recent log). It has no passwords, keys or codes. Nothing is sent unless you send it.</p>
+    <button id="reportMake">Make a problem report</button>
+    <div id="reportBox" hidden style="margin-top:10px">
+      <textarea id="reportText" readonly rows="10" style="width:100%;box-sizing:border-box;font:12px/1.4 ui-monospace,Consolas,monospace;color:var(--text);background:#10151c;border:1px solid var(--line);border-radius:8px;padding:8px"></textarea>
+      <div class="row" style="margin-top:8px"><button class="primary" id="reportCopy">Copy</button> <a id="reportMail" class="link" href="#">Email it to the developer</a></div>
+      <div class="hint">Copy it, then paste it into an email to muneermilleror@gmail.com with a line about what went wrong.</div>
+    </div>
   </div>
 
   <div class="card">
@@ -219,7 +234,7 @@
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-const LABEL = { shutdown:'Shut down', restart:'Restart', sleep:'Sleep', hibernate:'Hibernate', wake:'Turn on' };
+const LABEL = { shutdown:'Shut down', restart:'Restart', sleep:'Sleep', hibernate:'Hibernate', wake:'Turn on', bios:'Restart to BIOS settings', signout:'Sign out' };
 $('#days').innerHTML = DAYS.map((n, i) => `<label><input type="checkbox" name="day" value="${i}"><span>${n}</span></label>`).join('');
 
 function toast(msg, err) { const t = $('#toast'); t.textContent = msg; t.className = err ? 'err' : ''; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', err ? 6000 : 3500); }
@@ -270,6 +285,7 @@ async function refresh() {
     }
     $('#installCard').hidden = !loc.canInstall;
     $('#waitCard').hidden = !st.waiting;
+    $('#paused').checked = !!st.paused;
     if (st.waiting) $('#waitText').textContent = `Scheduled ${LABEL[st.waiting.action].toLowerCase()} is waiting: ${st.waiting.reason.toLowerCase()}. It will happen once the PC is free.`;
     $('#timerNow').hidden = !st.timer;
     if (st.timer) $('#timerText').textContent = `${LABEL[st.timer.action]} at ${st.timer.at} (in ${Math.max(1, Math.round(st.timer.seconds / 60))} min).`;
@@ -314,9 +330,12 @@ document.addEventListener('click', async e => {
     if (b.dataset.power) {
       const a = b.dataset.power;
       const active = pend && pendAt > Date.now() ? pend.action : null;
-      const q = active ? `${LABEL[active]} is counting down. Replace it with ${LABEL[a]}?` : `${LABEL[a]} this PC?`;
+      const ASK = { bios: 'Restart this PC into its BIOS settings?', signout: 'Sign out of Windows on this PC?' };
+      const q = active ? `${LABEL[active]} is counting down. Replace it with ${LABEL[a]}?` : (ASK[a] || `${LABEL[a]} this PC?`);
       const warn = a === 'shutdown' && nextTurnOn ? `\n\nThis PC is scheduled to turn on at ${nextTurnOn}. That will not happen after a full shut down. Use Sleep or Hibernate instead if you want it to.` : '';
-      if (!SESSION[a] && a !== 'cancel' && a !== active && !confirm(q + warn)) return;
+      const extra = a === 'signout' ? '\n\nOpen apps are closed. Unsaved work is lost. The PC stays on.'
+        : a === 'bios' ? '\n\nThe PC restarts into its BIOS (UEFI) settings in 60 seconds. You need a keyboard and screen at the PC to leave them.' : '';
+      if ((!SESSION[a] || a === 'signout') && a !== 'cancel' && a !== active && !confirm(q + warn + extra)) return;
       const r = await api('POST', '/api/power', { action: a });
       toast(r.message); refresh();
     } else if (b.dataset.toggle) { await api('PATCH', '/api/schedules/' + b.dataset.toggle, { enabled: b.dataset.on === '1' }); refresh(); }
@@ -330,6 +349,16 @@ document.addEventListener('click', async e => {
       b.disabled = false;
       await api('GET', '/api/local?fresh=1').catch(() => {});
       setTimeout(refresh, 1500);
+    }
+    else if (b.id === 'reportMake') {
+      const r = await api('GET', '/api/report');
+      $('#reportText').value = r.report; $('#reportBox').hidden = false;
+      $('#reportMail').href = 'mailto:' + r.email + '?subject=' + encodeURIComponent('PC Power problem report') +
+        '&body=' + encodeURIComponent('What went wrong:\n\n\n(Paste the report here.)');
+    }
+    else if (b.id === 'reportCopy') {
+      try { await navigator.clipboard.writeText($('#reportText').value); toast('Copied. Paste it into your email.'); }
+      catch (e) { $('#reportText').select(); document.execCommand('copy'); toast('Copied.'); }
     }
     else if (b.id === 'install') {
       await api('POST', '/api/local/install');
@@ -399,6 +428,10 @@ $('#agree').addEventListener('click', async () => {
   catch (err) { toast(err.message, true); }
 });
 $('#disagree').addEventListener('click', async () => { try { await api('POST', '/api/local/quit'); } catch (e) {} document.body.innerHTML = '<main><p>PC Power has been closed. You can close this window.</p></main>'; });
+$('#paused').addEventListener('change', async e => {
+  try { await api('PUT', '/api/automation', { paused: e.target.checked }); toast(e.target.checked ? 'All schedules paused.' : 'Schedules running again.'); refresh(); }
+  catch (err) { toast(err.message, true); }
+});
 $('#timerForm').addEventListener('submit', async e => {
   e.preventDefault(); const fd = new FormData(e.target);
   try { const r = await api('POST', '/api/timer', { action: fd.get('action'), minutes: Number(fd.get('minutes')) }); toast(r.message); refresh(); }

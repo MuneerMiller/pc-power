@@ -20,6 +20,10 @@ Android app that talk directly to each other: no account, no server, nothing col
 - **Runs before sign-in:** installs as a Windows service, with a proper entry in Installed apps to remove it.
 - **Widget and quick tile** on Android to turn a PC on without opening the app. With several PCs, one that is on relays the wake signal for the others.
 - **Activity list** showing what happened on the PC and who asked.
+- **Groups:** turn several PCs on or off together, give them the same schedule, or pause them all.
+- **App lock:** fingerprint, face or screen lock before turning a PC off (and optionally to open the app).
+- **Pause all schedules**, **Sign out**, **Restart to BIOS settings**, and an **Off** button on the widget.
+- **Problem reports:** one tap collects what PC Power sees (no keys or codes) for the user to email.
 - **Guided setup:** the app checks the PC's wake settings, explains the BIOS and router steps, and can test the away-from-home route.
 
 | Windows app | Android app |

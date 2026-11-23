@@ -100,6 +100,11 @@ class WakeWidget : AppWidgetProvider() {
             val intent = Intent(context, WakeReceiver::class.java)
             val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             views.setOnClickPendingIntent(R.id.wake_root, PendingIntent.getBroadcast(context, 0, intent, flags))
+            // Off opens the app, which confirms (and asks for the app lock if it is on) before turning the PC off.
+            val off = Intent(context, MainActivity::class.java)
+                .putExtra(MainActivity.EXTRA_REQUEST, "off")
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            views.setOnClickPendingIntent(R.id.off_button, PendingIntent.getActivity(context, 1, off, flags))
             return views
         }
 

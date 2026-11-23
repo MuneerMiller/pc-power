@@ -50,6 +50,9 @@ func doPower(action string) error {
 		return hidden("shutdown", "/r", "/t", "60", "/c", "PC Power: this PC will restart in 60 seconds. Open PC Power and press Cancel to stop it.").Run()
 	case "hibernate":
 		return hidden("shutdown", "/h").Run()
+	case "bios":
+		// /fw: restart into the UEFI firmware (BIOS) settings. Fails on PCs without UEFI.
+		return hidden("shutdown", "/r", "/fw", "/t", "60", "/c", "PC Power: this PC will restart into its BIOS settings in 60 seconds. Open PC Power and press Cancel to stop it.").Run()
 	case "cancel":
 		hidden("shutdown", "/a").Run() // exits non-zero when nothing was pending; that is fine
 		return nil
@@ -404,6 +407,9 @@ func sessionFullscreen() bool {
 
 func sessionRun(cmd string) {
 	switch cmd {
+	case "signout":
+		// EWX_LOGOFF: closes this user's apps and signs out. The PC stays on.
+		syscall.NewLazyDLL("user32.dll").NewProc("ExitWindowsEx").Call(0, 0)
 	case "lock":
 		procLockWorkStation.Call()
 	case "displayoff":
@@ -526,4 +532,20 @@ func makeNetworkPrivate(ifIndex int) error {
 	file, _ := windows.UTF16PtrFromString(filepath.Join(os.Getenv("SystemRoot"), `System32\WindowsPowerShell\v1.0\powershell.exe`))
 	args, _ := windows.UTF16PtrFromString("-NoProfile -WindowStyle Hidden -Command " + script)
 	return windows.ShellExecute(0, verb, file, args, nil, windows.SW_HIDE)
+}
+
+// osVersion is the Windows edition and build, for problem reports.
+func osVersion() string {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE)
+	if err != nil {
+		return "unknown"
+	}
+	defer k.Close()
+	name, _, _ := k.GetStringValue("ProductName")
+	disp, _, _ := k.GetStringValue("DisplayVersion")
+	build, _, _ := k.GetStringValue("CurrentBuild")
+	if b, _ := strconv.Atoi(build); b >= 22000 {
+		name = strings.Replace(name, "Windows 10", "Windows 11", 1) // the registry still says 10 on 11
+	}
+	return fmt.Sprintf("%s %s (build %s)", name, disp, build)
 }

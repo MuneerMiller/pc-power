@@ -42,7 +42,7 @@ const (
 	helperFreshness = 12 * time.Second // the tray helper reports every 3 s; older than this = nobody signed in
 )
 
-var sessionActions = map[string]string{"lock": "Lock", "displayoff": "Screen off", "mute": "Mute or unmute"}
+var sessionActions = map[string]string{"lock": "Lock", "displayoff": "Screen off", "mute": "Mute or unmute", "signout": "Sign out"}
 
 // act is filled in by the tray helper (which runs in the user's session) and by background samplers.
 var act struct {
@@ -347,6 +347,7 @@ func hAutomation(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Idle      *IdleRule
 		SkipDates *[]string
+		Paused    *bool
 	}
 	json.NewDecoder(r.Body).Decode(&b)
 	mu.Lock()
@@ -373,6 +374,16 @@ func hAutomation(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Strings(out)
 		cfg.SkipDates = out
+	}
+	if b.Paused != nil && *b.Paused != cfg.Paused {
+		cfg.Paused = *b.Paused
+		if cfg.Paused {
+			waiting = nil
+			addEventLocked("schedule", "Schedules paused, by "+who(r))
+		} else {
+			addEventLocked("schedule", "Schedules resumed, by "+who(r))
+		}
+		kickWake()
 	}
 	saveConfig()
 	reply(w, 200, map[string]bool{"ok": true})

@@ -7,6 +7,9 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
+import 'extras.dart';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
@@ -20,8 +23,14 @@ const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const actionLabels = {'shutdown': 'Shut down', 'restart': 'Restart', 'sleep': 'Sleep', 'hibernate': 'Hibernate'};
 const scheduleLabels = {...actionLabels, 'wake': 'Turn on'}; // what a schedule can do
 const sessionLabels = {'lock': 'Lock', 'displayoff': 'Screen off', 'mute': 'Mute'}; // instant, nothing to confirm
+const moreLabels = {'signout': 'Sign out', 'bios': 'Restart to BIOS settings'}; // need confirming, like turning off
+const allLabels = {...actionLabels, ...moreLabels};
 
-void main() => runApp(const PcPowerApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await AppLock.load(); // before the first frame, so a locked app never shows anything
+  runApp(const PcPowerApp());
+}
 
 // ---------------------------------------------------------------- data
 
@@ -266,6 +275,7 @@ class Api {
   static Future<void> setSchedule(Pc pc, String id, bool enabled) => _call(pc, 'PATCH', '/api/schedules/$id', {'enabled': enabled});
   static Future<void> deleteSchedule(Pc pc, String id) => _call(pc, 'DELETE', '/api/schedules/$id');
   static Future<void> unpair(Pc pc) => _call(pc, 'POST', '/api/unpair');
+  static Future<Map<String, dynamic>> report(Pc pc) => _call(pc, 'GET', '/api/report');
   static Future<String> setTimer(Pc pc, String action, int minutes) async => (await _call(pc, 'POST', '/api/timer', {'action': action, 'minutes': minutes}))['message'] ?? 'Timer set.';
   static Future<void> cancelTimer(Pc pc) => _call(pc, 'DELETE', '/api/timer');
   static Future<void> automation(Pc pc, Map<String, dynamic> change) => _call(pc, 'PUT', '/api/automation', change);
@@ -401,7 +411,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final online = <String, bool>{};
   Timer? timer;
   bool loaded = false;
@@ -409,15 +419,25 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
-    Store.load().then((_) {
+    WidgetsBinding.instance.addObserver(this);
+    Future.wait([Store.load(), Groups.load()]).then((_) {
+      if (!mounted) return;
+      Groups.tidy();
       setState(() => loaded = true);
       check();
+      handleWidgetRequest(context); // opened from the widget's Off button
     });
     timer = Timer.periodic(const Duration(seconds: 5), (_) => check());
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState s) {
+    if (s == AppLifecycleState.resumed && loaded) handleWidgetRequest(context);
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     timer?.cancel();
     super.dispose();
   }
@@ -465,6 +485,11 @@ class _HomePageState extends State<HomePage> {
             tooltip: 'How to set up',
             onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const HelpPage())),
           ),
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: 'Settings',
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AppSettingsPage())),
+          ),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
@@ -499,6 +524,29 @@ class _HomePageState extends State<HomePage> {
           : ListView(
               padding: const EdgeInsets.only(top: 6, bottom: 90),
               children: [
+                if (Groups.all.isNotEmpty) ...[
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(20, 8, 12, 4),
+                    child: Text('GROUPS', style: TextStyle(letterSpacing: 1.2, fontSize: 12)),
+                  ),
+                  for (final g in Groups.all)
+                    Card(
+                      child: ListTile(
+                        leading: const Icon(Icons.workspaces_outline, color: accent),
+                        title: Text(g.name, style: const TextStyle(fontWeight: FontWeight.w600)),
+                        subtitle: Text('${g.pcs.where((p) => online[p.id] == true).length} of ${g.pcs.length} on'),
+                        trailing: const Icon(Icons.chevron_right),
+                        onTap: () async {
+                          await Navigator.push(context, MaterialPageRoute(builder: (_) => GroupPage(group: g)));
+                          if (mounted) setState(() {});
+                        },
+                      ),
+                    ),
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(20, 12, 12, 4),
+                    child: Text('PCS', style: TextStyle(letterSpacing: 1.2, fontSize: 12)),
+                  ),
+                ],
                 for (final pc in Store.pcs)
                   Card(
                     child: ListTile(
@@ -525,6 +573,20 @@ class _HomePageState extends State<HomePage> {
                         setState(() {});
                         check();
                       },
+                    ),
+                  ),
+                if (Store.pcs.length > 1)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        icon: const Icon(Icons.workspaces_outline),
+                        label: const Text('Make a group (turn several PCs on or off together)'),
+                        onPressed: () async {
+                          if (await editGroup(context) && mounted) setState(() {});
+                        },
+                      ),
                     ),
                   ),
               ],
@@ -712,6 +774,7 @@ class _PcPageState extends State<PcPage> {
   List<String> busy = []; // why the PC counts as "in use" right now
   Map? timerNow, waitingNow, idleRule; // one-off timer, postponed schedule, idle rule
   List<String> skipDates = [];
+  bool paused = false; // every schedule on the PC is paused
   List events = [];
   String seenEvent = ''; // time of the newest activity entry this phone has shown
   bool hasSession = true; // someone is signed in on the PC (lock, screen off and mute need that)
@@ -768,6 +831,7 @@ class _PcPageState extends State<PcPage> {
           waitingNow = st['waiting'] is Map ? st['waiting'] : null;
           idleRule = st['idle'] is Map ? st['idle'] : null;
           skipDates = [for (final x in st['skipDates'] ?? []) '$x'];
+          paused = st['paused'] == true;
           events = st['events'] ?? [];
           final p = st['pending'];
           pendingAction = p is Map ? p['action'] : null;
@@ -823,27 +887,30 @@ class _PcPageState extends State<PcPage> {
       final choice = await showDialog<String>(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: Text(active == null ? '${actionLabels[action]} ${pc.name}?' : 'Replace ${actionLabels[active]!.toLowerCase()} with ${actionLabels[action]!.toLowerCase()}?'),
-          content: active == null && !warnWifi && !warnTurnOn && busy.isEmpty
+          title: Text(active == null ? '${allLabels[action]} ${pc.name}?' : 'Replace ${allLabels[active]!.toLowerCase()} with ${allLabels[action]!.toLowerCase()}?'),
+          content: active == null && !warnWifi && !warnTurnOn && busy.isEmpty && !moreLabels.containsKey(action)
               ? null
               : Text(
                   [
-                    if (active != null) '${actionLabels[active]} is counting down on ${pc.name}. It will be cancelled and ${actionLabels[action]!.toLowerCase()} will happen instead.',
+                    if (active != null) '${allLabels[active]} is counting down on ${pc.name}. It will be cancelled and ${allLabels[action]!.toLowerCase()} will happen instead.',
                     if (busy.isNotEmpty) 'The PC looks like it is in use: ${busy.join('; ').toLowerCase()}. Unsaved work could be lost.',
                     if (warnWifi) 'This PC is on Wi-Fi. After a full shut down you usually cannot turn it on from your phone. Sleep keeps that possible.',
-                    if (warnTurnOn) 'This PC is scheduled to turn on at $nextTurnOn. It cannot do that after a full shut down. ${actionLabels[instead]} keeps the schedule working.',
+                    if (action == 'signout') 'Open apps are closed and unsaved work is lost. The PC stays on.',
+                    if (action == 'bios') 'The PC restarts into its BIOS (UEFI) settings in 60 seconds. Someone at the PC needs a keyboard and screen to leave them.',
+                    if (warnTurnOn) 'This PC is scheduled to turn on at $nextTurnOn. It cannot do that after a full shut down. ${allLabels[instead]} keeps the schedule working.',
                   ].join('\n\n'),
                 ),
           actions: [
             TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('No')),
             if (warnWifi) TextButton(onPressed: () => Navigator.pop(ctx, 'sleep'), child: const Text('Sleep instead')),
-            if (warnTurnOn) TextButton(onPressed: () => Navigator.pop(ctx, instead), child: Text('${actionLabels[instead]} instead')),
-            FilledButton(onPressed: () => Navigator.pop(ctx, action), child: Text(actionLabels[action]!)),
+            if (warnTurnOn) TextButton(onPressed: () => Navigator.pop(ctx, instead), child: Text('${allLabels[instead]} instead')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, action), child: Text(allLabels[action]!)),
           ],
         ),
       );
       if (choice == null) return;
       action = choice;
+      if (!await AppLock.forPower('${allLabels[action]} ${pc.name}')) return;
     }
     try {
       final msg = await Api.power(pc, action);
@@ -1184,6 +1251,8 @@ class _PcPageState extends State<PcPage> {
       } catch (_) {}
       await Secure.delete(pc.id);
       Store.pcs.remove(pc);
+      Groups.tidy();
+      Groups.save();
       await Store.save();
       if (mounted) Navigator.pop(context);
     } else if (action == 'save') {
@@ -1217,6 +1286,14 @@ class _PcPageState extends State<PcPage> {
             onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const HelpPage())),
           ),
           IconButton(onPressed: settings, icon: const Icon(Icons.settings), tooltip: 'Connection settings'),
+          PopupMenuButton<String>(
+            tooltip: 'More',
+            onSelected: (v) => v == 'report' ? sendProblemReport(context, pc) : power(v),
+            itemBuilder: (_) => [
+              if (online == true && modern) const PopupMenuItem(value: 'bios', child: Text('Restart to BIOS settings')),
+              const PopupMenuItem(value: 'report', child: Text('Send a problem report')),
+            ],
+          ),
         ],
       ),
       body: ListView(
@@ -1290,6 +1367,7 @@ class _PcPageState extends State<PcPage> {
                         runSpacing: 8,
                         children: [
                           for (final a in sessionLabels.entries) TextButton(onPressed: hasSession ? () => power(a.key) : null, child: Text(a.value)),
+                          TextButton(onPressed: hasSession ? () => power('signout') : null, child: const Text('Sign out')),
                           TextButton.icon(onPressed: startTimer, icon: const Icon(Icons.hourglass_bottom, size: 18), label: const Text('Timer')),
                         ],
                       ),
@@ -1386,7 +1464,7 @@ class _PcPageState extends State<PcPage> {
             padding: const EdgeInsets.fromLTRB(20, 16, 12, 4),
             child: Row(
               children: [
-                Expanded(child: Text('SCHEDULES', style: Theme.of(context).textTheme.labelMedium?.copyWith(letterSpacing: 1.2))),
+                Expanded(child: Text(paused ? 'SCHEDULES · PAUSED' : 'SCHEDULES', style: Theme.of(context).textTheme.labelMedium?.copyWith(letterSpacing: 1.2))),
                 if (on) TextButton.icon(onPressed: addSchedule, icon: const Icon(Icons.add), label: const Text('Add')),
               ],
             ),
@@ -1423,6 +1501,14 @@ class _PcPageState extends State<PcPage> {
             Card(
               child: Column(
                 children: [
+                  SwitchListTile(
+                    secondary: const Icon(Icons.pause_circle_outline),
+                    title: const Text('Pause all schedules'),
+                    subtitle: Text(paused ? 'Paused: no schedule turns this PC off or on until you switch this off.' : 'For holidays or a week away.'),
+                    value: paused,
+                    onChanged: (v) => run(() => Api.automation(pc, {'paused': v}), v ? 'All schedules paused.' : 'Schedules running again.'),
+                  ),
+                  const Divider(height: 1),
                   ListTile(
                     leading: const Icon(Icons.bedtime_outlined),
                     title: const Text('When nobody is using the PC'),
@@ -1622,16 +1708,26 @@ class HelpPage extends StatelessWidget {
         'A scheduled turn-off waits while the PC is in use: someone used the keyboard or mouse in the last few minutes, a full-screen app is open, a program is keeping the PC awake, or a download is running. It happens once the PC is free, and gives up after three hours. Tick "Do it even if the PC is in use" on a schedule to skip the wait.',
         '"When nobody is using the PC" turns it off after the idle time you choose.',
         'Days off: repeating schedules skip the dates you add, for example public holidays.',
+        'Pause all schedules: for a holiday or a week away. No schedule turns the PC off or on until you switch it off again.',
         'Activity shows what happened on the PC and who asked for it. New entries are marked when you open the PC in this app. The app cannot send notifications while it is closed: that needs an online service, which PC Power does not have yet.',
       ],
     ),
     (
       'Turn on without opening the app',
       [
-        'Widget: long-press an empty spot on your home screen, tap Widgets, find PC Power and drag "Turn on PC" to the home screen.',
+        'Widget: long-press an empty spot on your home screen, tap Widgets, find PC Power and drag "Turn on PC" to the home screen. Its Off button opens the app to confirm turning the PC off.',
         'Quick tile: swipe down twice from the top of the screen, tap the pencil (Edit), and drag "Turn on PC" into your tiles.',
         'With more than one PC, open the PC you want, tap the gear icon and switch on "Home-screen widget turns on this PC".',
         'More than one PC at home? When you press Turn on, the app also asks any other paired PC that is on to send the wake signal. That works even when your phone is away from home, as long as it can reach that other PC.',
+      ],
+    ),
+    (
+      'Groups, app lock and more',
+      [
+        'Groups: with two or more PCs, tap "Make a group" under your PCs. A group turns all its PCs on or off together, adds the same schedule to all of them, or pauses their schedules.',
+        'App lock: Settings (gear at the top of the first screen) > App lock. PC Power then asks for your fingerprint, face or screen lock before turning a PC off, and optionally when you open the app.',
+        'Sign out closes the apps of whoever is signed in on the PC. Restart to BIOS settings (menu at the top right of a PC) is for changing BIOS settings, like "Wake Up Event By".',
+        'Something not working? Open the PC, tap the menu at the top right, then "Send a problem report". You see everything before it is sent, and it holds no passwords, keys or codes.',
       ],
     ),
     (
@@ -1974,7 +2070,7 @@ class _LegalGateState extends State<LegalGate> {
   @override
   Widget build(BuildContext context) {
     if (accepted == null) return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    if (accepted!) return const HomePage();
+    if (accepted!) return const LockGate(child: HomePage());
     const strong = TextStyle(fontWeight: FontWeight.w700, height: 1.4);
     return Scaffold(
       body: SafeArea(

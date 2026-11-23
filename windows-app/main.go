@@ -66,11 +66,12 @@ type Config struct {
 	Accepted  string     `json:"acceptedTerms"` // version of the Terms and Privacy Policy the user agreed to
 	Devices   []Device   `json:"devices"`
 	Schedules []Schedule `json:"schedules"`
-	Idle      IdleRule   `json:"idle"`      // turn off after nobody has used the PC for a while
-	Timer     *TimerT    `json:"timer"`     // one-off "turn off in N minutes"
-	SkipDates []string   `json:"skipDates"` // days off: repeating schedules do not run
-	Events    []Event    `json:"events"`    // activity log, newest last
-	DryRun    bool       `json:"dryRun"`    // testing: log power actions instead of doing them
+	Idle      IdleRule   `json:"idle"`             // turn off after nobody has used the PC for a while
+	Timer     *TimerT    `json:"timer"`            // one-off "turn off in N minutes"
+	SkipDates []string   `json:"skipDates"`        // days off: repeating schedules do not run
+	Paused    bool       `json:"paused,omitempty"` // every schedule (off and on) is paused
+	Events    []Event    `json:"events"`           // activity log, newest last
+	DryRun    bool       `json:"dryRun"`           // testing: log power actions instead of doing them
 }
 
 var (
@@ -227,7 +228,7 @@ func wolCheck(fresh bool) WolReport {
 
 var (
 	pending   *pendingT // guarded by mu: the shutdown or restart that is counting down, if any
-	labels    = map[string]string{"shutdown": "Shut down", "restart": "Restart", "sleep": "Sleep", "hibernate": "Hibernate", "wake": "Turn on"}
+	labels    = map[string]string{"shutdown": "Shut down", "restart": "Restart", "sleep": "Sleep", "hibernate": "Hibernate", "wake": "Turn on", "bios": "Restart to BIOS settings"}
 	priority  = map[string]int{"shutdown": 4, "restart": 3, "hibernate": 2, "sleep": 1}
 	countdown = 60 * time.Second
 )
@@ -298,6 +299,9 @@ func requestPower(action string, manual bool) (string, error) {
 	}
 	if err := execPower(action); err != nil {
 		log.Printf("power %s failed: %v", action, err)
+		if action == "bios" {
+			return "", errors.New("This PC cannot restart into its BIOS settings from Windows. That needs UEFI firmware, or another restart may be waiting.")
+		}
 		return "", errors.New("Windows already has a shutdown or restart waiting. Press Cancel countdown, then try again.")
 	}
 	pending = &pendingT{action, time.Now().Add(countdown)}
@@ -316,7 +320,7 @@ func tick(now time.Time) {
 	key := date + " " + hm
 	best, force := "", false
 	mu.Lock()
-	dayOff := onSkipDate(date)
+	dayOff := onSkipDate(date) || cfg.Paused
 	changed := false
 	for i := range cfg.Schedules {
 		s := &cfg.Schedules[i]
@@ -453,6 +457,9 @@ func nextOccurrence(s Schedule, now time.Time) time.Time {
 // nextWake finds the soonest enabled turn-on schedule. Must be called with mu held.
 func nextWake(now time.Time) time.Time {
 	var best time.Time
+	if cfg.Paused {
+		return best // schedules are paused: do not wake the PC either
+	}
 	for _, s := range cfg.Schedules {
 		if !s.Enabled || s.Action != "wake" {
 			continue

@@ -315,7 +315,7 @@ func status() map[string]any {
 	}
 	return map[string]any{"app": "pcpower", "version": 9, "name": cfg.Name, "ip": ip, "mac": mac, "broadcast": bc, "port": cfg.Port,
 		"time": time.Now().Format("15:04"), "schedules": cfg.Schedules, "pending": pend, "canHibernate": hib, "connection": conn, "wakeTest": wakeTestStatus(), "turnOn": wakeInfo(),
-		"activity": activity, "timer": timer, "waiting": wait, "idle": cfg.Idle, "skipDates": cfg.SkipDates, "events": events}
+		"activity": activity, "timer": timer, "waiting": wait, "idle": cfg.Idle, "skipDates": cfg.SkipDates, "events": events, "paused": cfg.Paused, "appVersion": appVersion}
 }
 
 func hStatus(w http.ResponseWriter, r *http.Request) { reply(w, 200, status()) }
@@ -332,7 +332,7 @@ func hPower(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, map[string]any{"ok": true, "message": label + " sent."})
 		return
 	}
-	if !actions[b.Action] && b.Action != "cancel" {
+	if !actions[b.Action] && b.Action != "cancel" && b.Action != "bios" {
 		fail(w, 400, "Unknown action")
 		return
 	}
@@ -436,6 +436,7 @@ func common(m *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
 	m.HandleFunc("DELETE /api/timer", wrap(hTimer))
 	m.HandleFunc("PUT /api/automation", wrap(hAutomation))
 	m.HandleFunc("POST /api/wake-peer", wrap(hWakePeer))
+	m.HandleFunc("GET /api/report", wrap(hReport))
 }
 
 // ---- phone-facing server ----

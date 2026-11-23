@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"time"
 )
@@ -23,7 +24,7 @@ func runTray()                { select {} }
 func doPower(action string) error {
 	cmds := map[string][]string{
 		"shutdown": {"shutdown", "-h", "+1"}, "restart": {"shutdown", "-r", "+1"},
-		"sleep": {"systemctl", "suspend"}, "hibernate": {"systemctl", "hibernate"}, "cancel": {"shutdown", "-c"},
+		"sleep": {"systemctl", "suspend"}, "hibernate": {"systemctl", "hibernate"}, "bios": {"systemctl", "reboot", "--firmware-setup"}, "cancel": {"shutdown", "-c"},
 	}
 	c := cmds[action]
 	return exec.Command(c[0], c[1:]...).Run()
@@ -120,3 +121,5 @@ func makeNetworkPrivate(int) error {
 	os.Setenv("PCPOWER_FAKE_NETWORK", "private")
 	return nil
 }
+
+func osVersion() string { return runtime.GOOS + " (test build)" }
