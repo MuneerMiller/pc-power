@@ -322,6 +322,8 @@ func doInstall(forUser, fromDir string, dry bool) error {
 	}
 	defer m.Disconnect()
 	stopService(m) // upgrading: free the program file
+	// Tray icons of every signed-in user run the installed program too; close them (not ourselves).
+	hidden("taskkill", "/F", "/IM", "PCPower.exe", "/FI", fmt.Sprintf("PID ne %d", os.Getpid())).Run()
 
 	// 1. The program.
 	self, err := os.Executable()
@@ -333,7 +335,15 @@ func doInstall(forUser, fromDir string, dry bool) error {
 		return err
 	}
 	if !strings.EqualFold(filepath.Clean(self), filepath.Clean(dst)) {
-		if err := copyFile(self, dst); err != nil {
+		// A process that just stopped can hold its file for a moment longer: retry for up to 20 seconds.
+		var err error
+		for i := 0; i < 40; i++ {
+			if err = copyFile(self, dst); err == nil {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if err != nil {
 			return fmt.Errorf("cannot copy the program to %s: %w", prog, err)
 		}
 	}
@@ -375,17 +385,22 @@ func doInstall(forUser, fromDir string, dry bool) error {
 	}
 
 	// 4. The service.
-	if s, err := m.OpenService(serviceName); err == nil {
-		s.Delete()
-		s.Close()
-		time.Sleep(time.Second)
-	}
-	s, err := m.CreateService(serviceName, dst, mgr.Config{
+	conf := mgr.Config{
 		DisplayName: "PC Power",
 		Description: "Runs PC Power's schedules and lets paired phones control this PC.",
 		StartType:   mgr.StartAutomatic,
-	}, "--service")
-	if err != nil {
+	}
+	s, err := m.OpenService(serviceName)
+	if err == nil {
+		// Updating: keep the existing service, just make sure it points at the program and starts with Windows.
+		old, _ := s.Config()
+		conf.BinaryPathName = `"` + dst + `" --service`
+		conf.ServiceType, conf.ErrorControl = old.ServiceType, old.ErrorControl
+		if err := s.UpdateConfig(conf); err != nil {
+			s.Close()
+			return fmt.Errorf("cannot update the service: %w", err)
+		}
+	} else if s, err = m.CreateService(serviceName, dst, conf, "--service"); err != nil {
 		return fmt.Errorf("cannot create the service: %w", err)
 	}
 	defer s.Close()
